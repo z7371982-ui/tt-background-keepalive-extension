@@ -13,13 +13,14 @@ const RESOURCE_NAME = 'third-party/tt-background-keepalive-extension';
 const COMPANION_BRIDGE_URL = 'http://127.0.0.1:18742/sync';
 const COMPANION_FORM_BRIDGE_URL = 'http://127.0.0.1:18742/form-sync';
 const COMPANION_REGISTER_URL = 'http://127.0.0.1:18742/register';
+const COMPANION_OPEN_TAURI_NOTIFICATION_SETTINGS_URL = 'http://127.0.0.1:18742/open-settings?target=tauri-notifications';
 const COMPANION_CONTENT_URL = 'content://com.cicimil.ttcompanion.bridge/sync';
-const COMPANION_APK_VERSION = '1.3.1';
+const COMPANION_APK_VERSION = '1.3.2';
 const COMPANION_APK_URL = 'https://raw.githubusercontent.com/z7371982-ui/tt-background-keepalive-extension/main/TauriTavern-Companion-latest.apk';
 const COMPANION_NOTIFICATION_TITLE = 'TT_COMPANION_SYNC_V1';
 const COMPANION_NOTIFICATION_CHANNEL = 'four_tavern_companion_sync';
 const COMPANION_PACKET_CHARS = 11_000;
-const EXTENSION_VERSION = '0.14.1';
+const EXTENSION_VERSION = '0.14.2';
 const DEFAULTS = Object.freeze({
     rtcEnabled: true,
     streamAssist: true,
@@ -62,6 +63,7 @@ let characterSyncInFlight = false;
 let lastSyncedCharacterKey = '';
 let notificationBridgeReady = false;
 let notificationChannelAttempted = false;
+let notificationSettingsJumpAt = 0;
 
 function collectAccessibleWindows(startWindow = window) {
     const windows = [];
@@ -180,6 +182,7 @@ function setText(selector, text) {
 }
 
 function renderStatus() {
+    setText('#ttka_extension_version', EXTENSION_VERSION);
     setText('#ttka_generation_state', diagnostics.generationActive ? '正在生成' : '空闲');
     setText('#ttka_visibility_state', document.visibilityState === 'hidden' ? '后台/隐藏' : '可见');
     setText('#ttka_rtc_state', diagnostics.rtcState);
@@ -365,6 +368,31 @@ function getTauriInvoke() {
     return typeof publicInvoke === 'function' ? publicInvoke : null;
 }
 
+function openTauriNotificationSettingsThroughCompanion() {
+    const now = Date.now();
+    if (now - notificationSettingsJumpAt < 15_000) {
+        return;
+    }
+    notificationSettingsJumpAt = now;
+
+    const frameName = `ttka_settings_${now}`;
+    const frame = document.createElement('iframe');
+    frame.name = frameName;
+    frame.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;left:-10px;top:-10px;border:0';
+    frame.setAttribute('aria-hidden', 'true');
+    const form = document.createElement('form');
+    form.method = 'GET';
+    form.action = COMPANION_OPEN_TAURI_NOTIFICATION_SETTINGS_URL;
+    form.target = frameName;
+    form.style.display = 'none';
+    (document.body || document.documentElement).append(frame, form);
+    form.submit();
+    setTimeout(() => {
+        form.remove();
+        frame.remove();
+    }, 2500);
+}
+
 async function ensureTauriNotificationBridge({ request = false } = {}) {
     const invoke = getTauriInvoke();
     if (!invoke) {
@@ -390,8 +418,10 @@ async function ensureTauriNotificationBridge({ request = false } = {}) {
 
     diagnostics.notificationPermission = permissionGranted ? '已允许' : '未允许';
     if (!permissionGranted) {
+        diagnostics.notificationPermission = '未允许（正在打开设置）';
         diagnostics.notificationChannel = '等待权限';
         renderStatus();
+        openTauriNotificationSettingsThroughCompanion();
         throw new Error('TauriTavern notification permission is not granted');
     }
 
@@ -724,8 +754,9 @@ async function enableTauriSyncPermission() {
         await syncCurrentCharacter({ force: true });
     } catch (error) {
         console.warn('[Four Tavern Companion] Notification permission setup failed:', error);
-        if (diagnostics.notificationPermission === '未允许') {
-            notify('warning', 'TauriTavern 通知权限没有开启。请到手机系统设置中允许 TauriTavern 发送通知。');
+        if (diagnostics.notificationPermission.startsWith('未允许')) {
+            openTauriNotificationSettingsThroughCompanion();
+            notify('warning', 'TauriTavern 通知权限没有开启，已经让小伴侣直接打开对应设置页。');
         } else {
             notify('warning', `TauriTavern 通知已允许，但同步初始化失败：${error instanceof Error ? error.message : String(error)}`);
         }
