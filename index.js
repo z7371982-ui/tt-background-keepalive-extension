@@ -12,6 +12,9 @@ const MODULE_NAME = 'tt-background-keepalive';
 const RESOURCE_NAME = 'third-party/tt-background-keepalive-extension';
 const COMPANION_BRIDGE_URL = 'http://127.0.0.1:18742/sync';
 const COMPANION_CONTENT_URL = 'content://com.cicimil.ttcompanion.bridge/sync';
+const COMPANION_NOTIFICATION_TITLE = 'TT_COMPANION_SYNC_V1';
+const COMPANION_NOTIFICATION_CHANNEL = 'tauritavern_ai_generation_keepalive';
+const COMPANION_NOTIFICATION_ID = 2408;
 const DEFAULTS = Object.freeze({
     rtcEnabled: true,
     streamAssist: true,
@@ -241,12 +244,51 @@ async function stopAudioFallback() {
     audioContext = null;
 }
 
-function companionPayload({ name = '', avatar = '' } = {}) {
+function companionPayload({ name = '', avatar = '', event = '' } = {}) {
     return {
         name: String(name).slice(0, 80),
         avatar,
+        event: String(event).slice(0, 24),
         wake: 600,
     };
+}
+
+function getTauriInvoke() {
+    const internalInvoke = globalThis.__TAURI_INTERNALS__?.invoke;
+    if (typeof internalInvoke === 'function') {
+        return internalInvoke;
+    }
+    const publicInvoke = globalThis.__TAURI__?.core?.invoke;
+    return typeof publicInvoke === 'function' ? publicInvoke : null;
+}
+
+async function syncThroughSilentNotification(payload) {
+    const invoke = getTauriInvoke();
+    if (!invoke) {
+        throw new Error('Tauri notification bridge unavailable');
+    }
+
+    const encodedPayload = JSON.stringify(payload);
+    const chunks = [];
+    for (let offset = 0; offset < encodedPayload.length; offset += 3000) {
+        chunks.push(encodedPayload.slice(offset, offset + 3000));
+    }
+    if (chunks.length === 0 || chunks.length > 5) {
+        throw new Error('Companion payload is too large');
+    }
+
+    await invoke('plugin:notification|notify', {
+        options: {
+            id: COMPANION_NOTIFICATION_ID,
+            channelId: COMPANION_NOTIFICATION_CHANNEL,
+            title: COMPANION_NOTIFICATION_TITLE,
+            body: 'TT 小伴侣正在同步',
+            inboxLines: chunks,
+            group: 'tt_companion_bridge',
+            autoCancel: true,
+            visibility: -1,
+        },
+    });
 }
 
 function syncThroughAndroidContentProvider(payload) {
@@ -276,6 +318,7 @@ function syncThroughAndroidContentProvider(payload) {
         const query = new URLSearchParams({
             name: payload.name,
             avatar: payload.avatar,
+            event: payload.event,
             wake: String(payload.wake),
             t: String(Date.now()),
         });
@@ -304,6 +347,17 @@ async function syncThroughLoopback(payload) {
 
 async function postToCompanion(input = {}) {
     const payload = companionPayload(input);
+    let notificationError = null;
+    try {
+        await syncThroughSilentNotification(payload);
+        diagnostics.companionBridgeState = '已发送（静默通知联动）';
+        diagnostics.companionBridgeError = '';
+        renderStatus();
+        return true;
+    } catch (error) {
+        notificationError = error;
+    }
+
     let contentError = null;
     try {
         await syncThroughAndroidContentProvider(payload);
@@ -322,10 +376,13 @@ async function postToCompanion(input = {}) {
         renderStatus();
         return true;
     } catch (error) {
+        const notificationMessage = notificationError instanceof Error
+            ? notificationError.message
+            : String(notificationError || 'unknown');
         const contentMessage = contentError instanceof Error ? contentError.message : String(contentError || 'unknown');
         const loopbackMessage = error instanceof Error ? error.message : String(error);
         diagnostics.companionBridgeState = '未连接';
-        diagnostics.companionBridgeError = `${contentMessage}; ${loopbackMessage}`;
+        diagnostics.companionBridgeError = `${notificationMessage}; ${contentMessage}; ${loopbackMessage}`;
         renderStatus();
         throw new Error(diagnostics.companionBridgeError);
     }
@@ -362,16 +419,16 @@ async function makeAvatarThumbnail(avatarFile) {
     const sourceX = Math.max(0, (image.naturalWidth - side) / 2);
     const sourceY = Math.max(0, (image.naturalHeight - side) / 2);
     const canvas = document.createElement('canvas');
-    canvas.width = 112;
-    canvas.height = 112;
+    canvas.width = 64;
+    canvas.height = 64;
     const context = canvas.getContext('2d', { alpha: false });
     context.fillStyle = '#f8efe9';
     context.fillRect(0, 0, canvas.width, canvas.height);
     context.drawImage(image, sourceX, sourceY, side, side, 0, 0, canvas.width, canvas.height);
-    return canvas.toDataURL('image/jpeg', 0.76).split(',')[1] || '';
+    return canvas.toDataURL('image/jpeg', 0.62).split(',')[1] || '';
 }
 
-async function syncCurrentCharacter({ quiet = false, force = false } = {}) {
+async function syncCurrentCharacter({ quiet = false, force = false, event = '' } = {}) {
     const character = this_chid === undefined ? null : characters[this_chid];
     if (!character) {
         if (!quiet) {
@@ -382,16 +439,22 @@ async function syncCurrentCharacter({ quiet = false, force = false } = {}) {
 
     const syncKey = `${String(this_chid)}|${String(character.name || '')}|${String(character.avatar || '')}`;
     if (!force && syncKey === lastSyncedCharacterKey) {
+        if (event) {
+            await postToCompanion({ event });
+        }
         return true;
     }
     if (characterSyncInFlight) {
+        if (event) {
+            await postToCompanion({ event });
+        }
         return false;
     }
 
     characterSyncInFlight = true;
     try {
         const avatar = await makeAvatarThumbnail(character.avatar);
-        await postToCompanion({ name: character.name, avatar });
+        await postToCompanion({ name: character.name, avatar, event });
         lastSyncedCharacterKey = syncKey;
         diagnostics.lastCharacterSyncKey = syncKey;
         diagnostics.lastCharacterSyncAt = new Date().toISOString();
@@ -402,7 +465,7 @@ async function syncCurrentCharacter({ quiet = false, force = false } = {}) {
     } catch (error) {
         console.warn('[TT Keepalive] Character sync failed:', error);
         try {
-            await postToCompanion({ name: character.name });
+            await postToCompanion({ name: character.name, event });
         } catch {
             // The companion may simply not be running. Never navigate TT away as a fallback.
         }
@@ -434,7 +497,7 @@ function scheduleAutomaticCharacterSync(delay = 650) {
 
 function diagnosticReport() {
     return JSON.stringify({
-        extensionVersion: '0.4.0',
+        extensionVersion: '0.5.0',
         userAgent: navigator.userAgent,
         visibility: document.visibilityState,
         settings: { ...settings() },
@@ -514,16 +577,29 @@ async function onGenerationStarted(_type, _params, isDryRun) {
     await Promise.allSettled([startRtcGuard(), startAudioFallback()]);
 
     if (settings().autoWake) {
-        void syncCurrentCharacter({ quiet: true, force: true });
+        void syncCurrentCharacter({ quiet: true, force: true, event: 'generating' });
     }
 }
 
-async function onGenerationFinished() {
+async function stopGenerationGuards(companionEvent) {
     diagnostics.generationActive = false;
     diagnostics.generationEndedAt = new Date().toISOString();
     closeRtcGuard();
     await stopAudioFallback();
     renderStatus();
+    if (settings().autoWake) {
+        void postToCompanion({ event: companionEvent }).catch(error => {
+            console.warn('[TT Keepalive] Companion generation event failed:', error);
+        });
+    }
+}
+
+async function onGenerationEnded() {
+    await stopGenerationGuards('complete');
+}
+
+async function onGenerationStopped() {
+    await stopGenerationGuards('stopped');
 }
 
 function bindCheckbox(id, key) {
@@ -606,8 +682,8 @@ function installHeartbeatDiagnostics() {
 installSurgicalStreamAssist();
 installHeartbeatDiagnostics();
 eventSource.on(event_types.GENERATION_STARTED, onGenerationStarted);
-eventSource.on(event_types.GENERATION_ENDED, onGenerationFinished);
-eventSource.on(event_types.GENERATION_STOPPED, onGenerationFinished);
+eventSource.on(event_types.GENERATION_ENDED, onGenerationEnded);
+eventSource.on(event_types.GENERATION_STOPPED, onGenerationStopped);
 eventSource.on(event_types.CHAT_CHANGED, () => scheduleAutomaticCharacterSync());
 eventSource.on(event_types.CHAT_LOADED, () => scheduleAutomaticCharacterSync());
 eventSource.on(event_types.CHARACTER_PAGE_LOADED, () => scheduleAutomaticCharacterSync());
