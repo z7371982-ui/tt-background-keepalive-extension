@@ -14,10 +14,12 @@ const COMPANION_BRIDGE_URL = 'http://127.0.0.1:18742/sync';
 const COMPANION_FORM_BRIDGE_URL = 'http://127.0.0.1:18742/form-sync';
 const COMPANION_REGISTER_URL = 'http://127.0.0.1:18742/register';
 const COMPANION_CONTENT_URL = 'content://com.cicimil.ttcompanion.bridge/sync';
+const COMPANION_APK_VERSION = '1.2.1';
+const COMPANION_APK_URL = 'https://raw.githubusercontent.com/z7371982-ui/tt-background-keepalive-extension/main/TauriTavern-Companion-latest.apk';
 const COMPANION_NOTIFICATION_TITLE = 'TT_COMPANION_SYNC_V1';
 const COMPANION_NOTIFICATION_CHANNEL = 'tauritavern_ai_generation_keepalive';
 const COMPANION_PACKET_CHARS = 11_000;
-const EXTENSION_VERSION = '0.10.0';
+const EXTENSION_VERSION = '0.12.0';
 const DEFAULTS = Object.freeze({
     rtcEnabled: true,
     streamAssist: true,
@@ -79,7 +81,7 @@ function collectAccessibleWindows(startWindow = window) {
 function detectTavernHost() {
     const override = extension_settings[MODULE_NAME]?.hostMode;
     const manualHosts = {
-        tt: { id: 'tt', label: 'TT' },
+        tt: { id: 'tt', label: 'TauriTavern' },
         luker: { id: 'luker', label: 'Luker' },
         termux: { id: 'termux', label: 'Termux 酒馆' },
         sillytavern: { id: 'sillytavern', label: 'SillyTavern' },
@@ -99,7 +101,7 @@ function detectTavernHost() {
         }
     });
     if (isTt) {
-        return { id: 'tt', label: 'TT' };
+        return { id: 'tt', label: 'TauriTavern' };
     }
 
     const isLuker = windows.some(owner => {
@@ -357,6 +359,35 @@ function getTauriInvoke() {
     return typeof publicInvoke === 'function' ? publicInvoke : null;
 }
 
+async function openCompanionInstaller() {
+    let openedExternally = false;
+    const invoke = getTauriInvoke();
+    if (invoke) {
+        try {
+            await invoke('plugin:opener|open_url', {
+                url: COMPANION_APK_URL,
+                with: undefined,
+            });
+            openedExternally = true;
+        } catch (error) {
+            console.info('[Four Tavern Companion] Native opener unavailable, using browser fallback:', error);
+        }
+    }
+
+    if (!openedExternally) {
+        const link = document.createElement('a');
+        link.href = COMPANION_APK_URL;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.download = `TauriTavern-Companion-${COMPANION_APK_VERSION}.apk`;
+        (document.body || document.documentElement).append(link);
+        link.click();
+        link.remove();
+    }
+
+    notify('info', `正在下载酒馆小伴侣 ${COMPANION_APK_VERSION}；下载完成后请确认安装。`);
+}
+
 async function sendSilentNotificationPacket(encodedPacket, notificationId) {
     const invoke = getTauriInvoke();
     if (!invoke) {
@@ -376,7 +407,7 @@ async function sendSilentNotificationPacket(encodedPacket, notificationId) {
             id: notificationId,
             channelId: COMPANION_NOTIFICATION_CHANNEL,
             title: COMPANION_NOTIFICATION_TITLE,
-            body: 'TT 小伴侣正在同步',
+            body: 'TauriTavern 小伴侣正在同步',
             inboxLines: chunks,
             group: 'tt_companion_bridge',
             autoCancel: true,
@@ -411,7 +442,9 @@ async function syncThroughSilentNotification(payload) {
             ),
         });
         await sendSilentNotificationPacket(packet, notificationBase + index);
-        await new Promise(resolve => setTimeout(resolve, 35));
+        // Physical Android 16 devices can throttle a burst of notifications even when
+        // an emulator accepts it. Keep the packets ordered and comfortably spaced.
+        await new Promise(resolve => setTimeout(resolve, 120));
     }
 }
 
@@ -577,11 +610,18 @@ async function postToCompanion(input = {}) {
     if (await tryTransport('四端本机通道', syncThroughLoopback)) {
         return true;
     }
-    if (await tryTransport('浏览器表单通道', syncThroughLoopbackForm)) {
-        return true;
-    }
-    if (payload.source === 'tt'
-        && await tryTransport('TT 静默通知已发出', syncThroughSilentNotification)) {
+    if (payload.source === 'tt') {
+        // A blocked form navigation still fires iframe.onload in some Android WebViews.
+        // Submit it as a best-effort direct path, but never let that false-positive
+        // suppress TT's notification bridge on a physical phone.
+        const formSubmitted = await tryTransport('浏览器表单已提交', syncThroughLoopbackForm);
+        if (await tryTransport('TauriTavern 静默通知备份已发出', syncThroughSilentNotification)) {
+            return true;
+        }
+        if (formSubmitted) {
+            return true;
+        }
+    } else if (await tryTransport('浏览器表单通道', syncThroughLoopbackForm)) {
         return true;
     }
     if (await tryTransport('Android 系统通道', syncThroughAndroidContentProvider)) {
@@ -914,6 +954,7 @@ async function installSettingsPanel() {
     bindCheckbox('ttka_auto_wake', 'autoWake');
     bindCheckbox('ttka_auto_character_sync', 'autoCharacterSync');
     bindHostMode();
+    document.getElementById('ttka_install_companion')?.addEventListener('click', () => void openCompanionInstaller());
     document.getElementById('ttka_test_companion')?.addEventListener('click', () => void testCompanionConnection());
     document.getElementById('ttka_sync_companion')?.addEventListener('click', () => void syncCurrentCharacter({ force: true }));
     document.getElementById('ttka_copy_report')?.addEventListener('click', () => void copyDiagnostics());

@@ -5,7 +5,7 @@
       <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
     </div>
     <div class="inline-drawer-content">
-      <p class="ttka-note">支持 SillyTavern、Luker、Termux 与 TT。只同步当前角色名、头像、生成状态和返回地址，不接管模型请求，也不读取聊天内容。</p>
+      <p class="ttka-note">支持 SillyTavern、Luker、Termux 与 TauriTavern。只同步当前角色名、头像、生成状态和返回地址，不接管模型请求，也不读取聊天内容。</p>
 
       <label for="ttka_host_mode">酒馆端识别</label>
       <select id="ttka_host_mode" class="text_pole">
@@ -13,7 +13,7 @@
         <option value="sillytavern">SillyTavern</option>
         <option value="luker">Luker</option>
         <option value="termux">Termux 酒馆</option>
-        <option value="tt">TT</option>
+        <option value="tt">TauriTavern</option>
       </select>
       <small>自动识别不准时可以手动指定；改完会立即重新同步当前角色和返回地址。</small>
 
@@ -56,6 +56,10 @@
       </div>
 
       <div class="ttka-actions">
+        <button id="ttka_install_companion" class="menu_button menu_button_icon" type="button">
+          <i class="fa-solid fa-download"></i>
+          <span>下载 / 安装酒馆小伴侣</span>
+        </button>
         <button id="ttka_test_companion" class="menu_button menu_button_icon" type="button">
           <i class="fa-solid fa-link"></i>
           <span>测试连接小伴侣</span>
@@ -69,6 +73,7 @@
           <span>复制诊断</span>
         </button>
       </div>
+      <small>APK 与扩展放在同一个 GitHub 仓库中。更新扩展后点上面的按钮即可下载配套最新版；Android 会要求你再确认一次安装。</small>
       <small>双击小伴侣会返回最近联动的酒馆端；生成中显示转动圆环，完成后绿色勾会保留，回到酒馆时自动清掉。</small>
     </div>
   </div>
