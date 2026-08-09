@@ -19,12 +19,12 @@ const COMPANION_FORM_BRIDGE_URL = 'http://127.0.0.1:18742/form-sync';
 const COMPANION_REGISTER_URL = 'http://127.0.0.1:18742/register';
 const COMPANION_OPEN_TAURI_NOTIFICATION_SETTINGS_URL = 'http://127.0.0.1:18742/open-settings?target=tauri-notifications';
 const COMPANION_CONTENT_URL = 'content://com.cicimil.ttcompanion.bridge/sync';
-const COMPANION_APK_VERSION = '1.5.1';
+const COMPANION_APK_VERSION = '1.6.0';
 const COMPANION_APK_URL = 'https://raw.githubusercontent.com/z7371982-ui/tt-background-keepalive-extension/main/TauriTavern-Companion-latest.apk';
 const COMPANION_NOTIFICATION_TITLE = 'TT_COMPANION_SYNC_V1';
 const COMPANION_NOTIFICATION_CHANNEL = 'four_tavern_companion_sync';
 const COMPANION_PACKET_CHARS = 2_800;
-const EXTENSION_VERSION = '0.16.1';
+const EXTENSION_VERSION = '0.17.0';
 const DEFAULTS = Object.freeze({
     rtcEnabled: true,
     streamAssist: true,
@@ -1003,15 +1003,21 @@ function installSurgicalStreamAssist() {
     let nextSyntheticId = -1;
 
     globalThis.setTimeout = function ttKeepaliveSetTimeout(handler, delay = 0, ...args) {
-        const source = typeof handler === 'function' ? Function.prototype.toString.call(handler) : '';
-        const isTtFrameFlush = typeof handler === 'function'
-            && Number(delay) === 10
-            && (handler.name === 'flushFrames' || source.includes('flushFrames'));
+        // This hook sits on a very hot browser path. Return immediately for
+        // ordinary timers; Function#toString is used only for the rare 10 ms
+        // timer while TT is actively generating in the background.
+        if (typeof handler !== 'function'
+            || Number(delay) !== 10
+            || !diagnostics.generationActive
+            || document.visibilityState !== 'hidden'
+            || !settings().streamAssist) {
+            return nativeSetTimeout(handler, delay, ...args);
+        }
 
-        if (settings().streamAssist
-            && diagnostics.generationActive
-            && document.visibilityState === 'hidden'
-            && isTtFrameFlush) {
+        const isNamedFlush = handler.name === 'flushFrames';
+        const isTtFrameFlush = isNamedFlush
+            || Function.prototype.toString.call(handler).includes('flushFrames');
+        if (isTtFrameFlush) {
             const syntheticId = nextSyntheticId--;
             queueMicrotask(() => {
                 if (!canceled.delete(syntheticId)) {
@@ -1059,7 +1065,8 @@ async function onGenerationStarted(_type, _params, isDryRun) {
         });
         // Character identity is a second independent packet. If the avatar
         // endpoint fails, syncCurrentCharacter still retries with the name only.
-        void syncCurrentCharacter({ quiet: true, force: true });
+        // The cached key makes this a no-op when the character did not change.
+        void syncCurrentCharacter({ quiet: true });
     }
     await Promise.allSettled([startRtcGuard(), startAudioFallback()]);
 }
@@ -1181,7 +1188,7 @@ function installHeartbeatDiagnostics() {
         diagnostics.lastHeartbeatAt = now;
         diagnostics.largestHeartbeatGapMs = Math.max(diagnostics.largestHeartbeatGapMs, gap);
         renderStatus();
-    }, 1000);
+    }, 3000);
 
     document.addEventListener('visibilitychange', () => {
         diagnostics.visibilityChanges += 1;
