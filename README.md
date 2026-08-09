@@ -22,11 +22,14 @@
 - 完整小悬浮窗长按可直接打开小伴侣主界面；双击仍返回当前酒馆端。
 - 小伴侣主页记录最近一次角色同步的通道、名字和头像是否实际收到，方便定位真机同步问题。
 - 0.14.3 将 TauriTavern 同步包同时写入标准通知正文和 InboxStyle，多包间隔按真机限流调整；配套 APK 1.3.3 会主动重绑通知监听，并显示监听服务的真实连接状态。
+- 0.14.4 不再在通知正文显示同步数据；同步包加入内部识别标记，并先单独发送角色名/生成状态，再传头像分片，避免头像丢片连带吞掉状态。
+- 0.15.0 新增 `ws://127.0.0.1:18742/ws` 本机 WebSocket 主通道，角色原头像和生成中/完成状态不再依赖 Android 通知监听；通知只在直连失败时备用。
 
 ## 四端传输
 
-- TauriTavern 优先使用原有静默通知通道，兼容 1.0 小伴侣。
-- Luker、Termux 和 SillyTavern 优先使用 `http://127.0.0.1:18742/sync` 本机通道。
+- TauriTavern、Luker、Termux 和 SillyTavern 均优先使用小伴侣的本机 WebSocket 直连。
+- TauriTavern 保留原有静默通知通道作为 WebSocket 失败时的兼容备用。
+- WebSocket 不可用时，Luker、Termux 和 SillyTavern 再使用 `http://127.0.0.1:18742/sync` 本机通道。
 - Android ContentProvider 作为兼容回退。
 - 浏览器若限制普通 `fetch`，会再尝试隐藏表单通道；小数据连接测试还可使用像素注册链接。
 - TauriTavern 也会先尝试本机直连传头像，再退回使用唯一通知编号的静默分片，减少连续切换角色时旧通知覆盖新通知。
@@ -38,6 +41,6 @@ Android 厂商仍可完全冻结后台 WebView。小伴侣的前台服务、局�
 
 ## 安装
 
-将本目录（包括 `TauriTavern-Companion-latest.apk`）发布到 GitHub 后，在每个酒馆的“扩展 → 安装扩展”中粘贴同一个 Git 仓库 URL。版本为 0.14.3。
+将本目录（包括 `TauriTavern-Companion-latest.apk`）发布到 GitHub 后，在每个酒馆的“扩展 → 安装扩展”中粘贴同一个 Git 仓库 URL。版本为 0.15.0。
 
 以后更新时同时覆盖扩展文件和 `TauriTavern-Companion-latest.apk`。用户更新扩展后，在扩展设置中点击“下载 / 安装酒馆小伴侣”，系统浏览器会下载配套 APK；Android 会保留最后一次安装确认。

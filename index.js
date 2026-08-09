@@ -11,16 +11,17 @@ import { extension_settings, renderExtensionTemplateAsync } from '../../../exten
 const MODULE_NAME = 'tt-background-keepalive';
 const RESOURCE_NAME = 'third-party/tt-background-keepalive-extension';
 const COMPANION_BRIDGE_URL = 'http://127.0.0.1:18742/sync';
+const COMPANION_WEBSOCKET_URL = 'ws://127.0.0.1:18742/ws';
 const COMPANION_FORM_BRIDGE_URL = 'http://127.0.0.1:18742/form-sync';
 const COMPANION_REGISTER_URL = 'http://127.0.0.1:18742/register';
 const COMPANION_OPEN_TAURI_NOTIFICATION_SETTINGS_URL = 'http://127.0.0.1:18742/open-settings?target=tauri-notifications';
 const COMPANION_CONTENT_URL = 'content://com.cicimil.ttcompanion.bridge/sync';
-const COMPANION_APK_VERSION = '1.3.3';
+const COMPANION_APK_VERSION = '1.4.0';
 const COMPANION_APK_URL = 'https://raw.githubusercontent.com/z7371982-ui/tt-background-keepalive-extension/main/TauriTavern-Companion-latest.apk';
 const COMPANION_NOTIFICATION_TITLE = 'TT_COMPANION_SYNC_V1';
 const COMPANION_NOTIFICATION_CHANNEL = 'four_tavern_companion_sync';
 const COMPANION_PACKET_CHARS = 2_800;
-const EXTENSION_VERSION = '0.14.3';
+const EXTENSION_VERSION = '0.15.0';
 const DEFAULTS = Object.freeze({
     rtcEnabled: true,
     streamAssist: true,
@@ -349,6 +350,7 @@ async function stopAudioFallback() {
 function companionPayload({ name = '', avatar = '', event = '' } = {}) {
     const host = detectTavernHost();
     return {
+        bridge: COMPANION_NOTIFICATION_TITLE,
         name: String(name).slice(0, 80),
         avatar,
         event: String(event).slice(0, 24),
@@ -498,10 +500,7 @@ async function sendSilentNotificationPacket(encodedPacket, notificationId) {
     const options = {
         id: notificationId,
         title: COMPANION_NOTIFICATION_TITLE,
-        // Keep a complete copy in both standard Android fields. Some physical
-        // devices omit InboxStyle lines from listener callbacks after an app update,
-        // while emulators expose them consistently.
-        body: encodedPacket,
+        body: '正在同步角色与生成状态',
         inboxLines: chunks,
         group: 'tt_companion_bridge',
         autoCancel: true,
@@ -529,8 +528,14 @@ async function syncThroughSilentNotification(payload) {
         throw new Error('Companion avatar is too large');
     }
 
+    // Deliver the small state/name packet first, so one dropped avatar fragment
+    // cannot also hide generation state and the current character name.
+    await sendSilentNotificationPacket(JSON.stringify({ ...payload, avatar: '' }), notificationBase);
+    await new Promise(resolve => setTimeout(resolve, 260));
+
     for (let index = 0; index < total; index += 1) {
         const packet = JSON.stringify({
+            bridge: COMPANION_NOTIFICATION_TITLE,
             kind: 'multipart',
             transfer,
             index,
@@ -540,7 +545,7 @@ async function syncThroughSilentNotification(payload) {
                 (index + 1) * COMPANION_PACKET_CHARS,
             ),
         });
-        await sendSilentNotificationPacket(packet, notificationBase + index);
+        await sendSilentNotificationPacket(packet, notificationBase + index + 1);
         // Physical Android 16 devices can throttle a burst of notifications even when
         // an emulator accepts it. Keep the packets ordered and comfortably spaced.
         await new Promise(resolve => setTimeout(resolve, 260));
@@ -601,6 +606,63 @@ async function syncThroughLoopback(payload) {
     } finally {
         clearTimeout(timeout);
     }
+}
+
+function syncThroughLoopbackWebSocket(payload) {
+    return new Promise((resolve, reject) => {
+        let socket;
+        let settled = false;
+        const timeout = setTimeout(() => finish(new Error('Local WebSocket timed out')), 3500);
+        const finish = (error = null) => {
+            if (settled) {
+                return;
+            }
+            settled = true;
+            clearTimeout(timeout);
+            try {
+                socket?.close();
+            } catch {
+                // The peer may already have closed after acknowledging the packet.
+            }
+            if (error) {
+                reject(error);
+            } else {
+                resolve(true);
+            }
+        };
+
+        try {
+            socket = new WebSocket(`${COMPANION_WEBSOCKET_URL}?t=${Date.now()}`);
+        } catch (error) {
+            finish(error instanceof Error ? error : new Error(String(error)));
+            return;
+        }
+        socket.onopen = () => {
+            try {
+                socket.send(JSON.stringify(payload));
+            } catch (error) {
+                finish(error instanceof Error ? error : new Error(String(error)));
+            }
+        };
+        socket.onmessage = event => {
+            try {
+                const acknowledgement = JSON.parse(String(event.data || ''));
+                if (acknowledgement?.ok === true) {
+                    finish();
+                } else {
+                    finish(new Error('Companion rejected the WebSocket packet'));
+                }
+            } catch (error) {
+                finish(error instanceof Error ? error : new Error(String(error)));
+            }
+        };
+        socket.onerror = () => finish(new Error('Local WebSocket unavailable'));
+        socket.onclose = () => {
+            if (!settled) {
+                finish(new Error('Local WebSocket closed before acknowledgement'));
+            }
+        };
+    });
 }
 
 function syncThroughLoopbackForm(payload) {
@@ -706,7 +768,10 @@ async function postToCompanion(input = {}) {
         }
     };
 
-    if (await tryTransport('四端本机通道', syncThroughLoopback)) {
+    if (await tryTransport('四端本机 WebSocket 直连', syncThroughLoopbackWebSocket)) {
+        return true;
+    }
+    if (await tryTransport('四端本机 HTTP 通道', syncThroughLoopback)) {
         return true;
     }
     if (payload.source === 'tt') {
@@ -739,9 +804,6 @@ async function postToCompanion(input = {}) {
 
 async function testCompanionConnection() {
     try {
-        if (detectTavernHost().id === 'tt') {
-            await ensureTauriNotificationBridge({ request: true });
-        }
         await postToCompanion();
         notify('success', `已从 ${detectTavernHost().label} 连到小伴侣。`);
     } catch (error) {
@@ -767,15 +829,6 @@ async function enableTauriSyncPermission() {
 }
 
 async function manualSyncCurrentCharacter() {
-    if (detectTavernHost().id === 'tt') {
-        try {
-            await ensureTauriNotificationBridge({ request: true });
-        } catch (error) {
-            console.warn('[Four Tavern Companion] Cannot sync without notification permission:', error);
-            notify('warning', '请先开启 TauriTavern 通知权限。');
-            return;
-        }
-    }
     await syncCurrentCharacter({ force: true });
 }
 
