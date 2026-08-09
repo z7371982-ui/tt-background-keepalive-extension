@@ -11,17 +11,20 @@ import { extension_settings, renderExtensionTemplateAsync } from '../../../exten
 const MODULE_NAME = 'tt-background-keepalive';
 const RESOURCE_NAME = 'third-party/tt-background-keepalive-extension';
 const COMPANION_BRIDGE_URL = 'http://127.0.0.1:18742/sync';
-const COMPANION_WEBSOCKET_URL = 'ws://127.0.0.1:18742/ws';
+const COMPANION_WEBSOCKET_URLS = [
+    'ws://127.0.0.1:18742/ws',
+    'ws://[::1]:18742/ws',
+];
 const COMPANION_FORM_BRIDGE_URL = 'http://127.0.0.1:18742/form-sync';
 const COMPANION_REGISTER_URL = 'http://127.0.0.1:18742/register';
 const COMPANION_OPEN_TAURI_NOTIFICATION_SETTINGS_URL = 'http://127.0.0.1:18742/open-settings?target=tauri-notifications';
 const COMPANION_CONTENT_URL = 'content://com.cicimil.ttcompanion.bridge/sync';
-const COMPANION_APK_VERSION = '1.4.0';
+const COMPANION_APK_VERSION = '1.5.0';
 const COMPANION_APK_URL = 'https://raw.githubusercontent.com/z7371982-ui/tt-background-keepalive-extension/main/TauriTavern-Companion-latest.apk';
 const COMPANION_NOTIFICATION_TITLE = 'TT_COMPANION_SYNC_V1';
 const COMPANION_NOTIFICATION_CHANNEL = 'four_tavern_companion_sync';
 const COMPANION_PACKET_CHARS = 2_800;
-const EXTENSION_VERSION = '0.15.0';
+const EXTENSION_VERSION = '0.16.0';
 const DEFAULTS = Object.freeze({
     rtcEnabled: true,
     streamAssist: true,
@@ -608,11 +611,11 @@ async function syncThroughLoopback(payload) {
     }
 }
 
-function syncThroughLoopbackWebSocket(payload) {
+function syncThroughOneLoopbackWebSocket(url, payload) {
     return new Promise((resolve, reject) => {
         let socket;
         let settled = false;
-        const timeout = setTimeout(() => finish(new Error('Local WebSocket timed out')), 3500);
+        const timeout = setTimeout(() => finish(new Error(`${url} timed out`)), 1800);
         const finish = (error = null) => {
             if (settled) {
                 return;
@@ -632,7 +635,7 @@ function syncThroughLoopbackWebSocket(payload) {
         };
 
         try {
-            socket = new WebSocket(`${COMPANION_WEBSOCKET_URL}?t=${Date.now()}`);
+            socket = new WebSocket(`${url}?t=${Date.now()}`);
         } catch (error) {
             finish(error instanceof Error ? error : new Error(String(error)));
             return;
@@ -656,13 +659,26 @@ function syncThroughLoopbackWebSocket(payload) {
                 finish(error instanceof Error ? error : new Error(String(error)));
             }
         };
-        socket.onerror = () => finish(new Error('Local WebSocket unavailable'));
+        socket.onerror = () => finish(new Error(`${url} unavailable`));
         socket.onclose = () => {
             if (!settled) {
                 finish(new Error('Local WebSocket closed before acknowledgement'));
             }
         };
     });
+}
+
+async function syncThroughLoopbackWebSocket(payload) {
+    const failures = [];
+    for (const url of COMPANION_WEBSOCKET_URLS) {
+        try {
+            await syncThroughOneLoopbackWebSocket(url, payload);
+            return true;
+        } catch (error) {
+            failures.push(error instanceof Error ? error.message : String(error));
+        }
+    }
+    throw new Error(`IPv4/IPv6 local WebSocket failed: ${failures.join('; ')}`);
 }
 
 function syncThroughLoopbackForm(payload) {
@@ -1036,15 +1052,19 @@ async function onGenerationStarted(_type, _params, isDryRun) {
     renderStatus();
 
     if (settings().autoWake) {
-        void syncCurrentCharacter({ quiet: true, force: true, event: 'generating' });
+        // Send the tiny state packet immediately. Avatar loading/decoding must
+        // never delay or suppress the yellow "generating" reaction.
+        void postToCompanion({ event: 'generating' }).catch(error => {
+            console.warn('[Four Tavern Companion] Generation-start state failed:', error);
+        });
+        // Character identity is a second independent packet. If the avatar
+        // endpoint fails, syncCurrentCharacter still retries with the name only.
+        void syncCurrentCharacter({ quiet: true, force: true });
     }
     await Promise.allSettled([startRtcGuard(), startAudioFallback()]);
 }
 
 async function stopGenerationGuards(companionEvent) {
-    if (!diagnostics.generationActive) {
-        return;
-    }
     diagnostics.generationActive = false;
     diagnostics.generationEndedAt = new Date().toISOString();
     closeRtcGuard();
