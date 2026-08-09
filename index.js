@@ -17,9 +17,9 @@ const COMPANION_CONTENT_URL = 'content://com.cicimil.ttcompanion.bridge/sync';
 const COMPANION_APK_VERSION = '1.2.1';
 const COMPANION_APK_URL = 'https://raw.githubusercontent.com/z7371982-ui/tt-background-keepalive-extension/main/TauriTavern-Companion-latest.apk';
 const COMPANION_NOTIFICATION_TITLE = 'TT_COMPANION_SYNC_V1';
-const COMPANION_NOTIFICATION_CHANNEL = 'tauritavern_ai_generation_keepalive';
+const COMPANION_NOTIFICATION_CHANNEL = 'four_tavern_companion_sync';
 const COMPANION_PACKET_CHARS = 11_000;
-const EXTENSION_VERSION = '0.12.0';
+const EXTENSION_VERSION = '0.13.0';
 const DEFAULTS = Object.freeze({
     rtcEnabled: true,
     streamAssist: true,
@@ -44,6 +44,8 @@ const diagnostics = {
     lastCharacterSyncKey: '',
     companionBridgeState: '未测试',
     companionBridgeError: '',
+    notificationPermission: '未检查',
+    notificationChannel: '未创建',
 };
 
 let rtcPeerA = null;
@@ -58,6 +60,7 @@ let heartbeatTimer = null;
 let characterSyncTimer = null;
 let characterSyncInFlight = false;
 let lastSyncedCharacterKey = '';
+let notificationBridgeReady = false;
 
 function collectAccessibleWindows(startWindow = window) {
     const windows = [];
@@ -180,6 +183,8 @@ function renderStatus() {
     setText('#ttka_visibility_state', document.visibilityState === 'hidden' ? '后台/隐藏' : '可见');
     setText('#ttka_rtc_state', diagnostics.rtcState);
     setText('#ttka_companion_bridge_state', diagnostics.companionBridgeState);
+    setText('#ttka_notification_permission', diagnostics.notificationPermission);
+    setText('#ttka_notification_channel', diagnostics.notificationChannel);
     setText('#ttka_host_state', detectTavernHost().label);
     setText(
         '#ttka_heartbeat_gap',
@@ -359,6 +364,62 @@ function getTauriInvoke() {
     return typeof publicInvoke === 'function' ? publicInvoke : null;
 }
 
+async function ensureTauriNotificationBridge({ request = false } = {}) {
+    const invoke = getTauriInvoke();
+    if (!invoke) {
+        diagnostics.notificationPermission = '当前端不使用 Tauri 通知';
+        diagnostics.notificationChannel = '不适用';
+        renderStatus();
+        throw new Error('Tauri notification bridge unavailable');
+    }
+
+    let permissionGranted = false;
+    try {
+        permissionGranted = Boolean(await invoke('plugin:notification|is_permission_granted'));
+        if (!permissionGranted && request) {
+            const permission = await invoke('plugin:notification|request_permission');
+            permissionGranted = permission === 'granted';
+        }
+    } catch (error) {
+        diagnostics.notificationPermission = '无法检查';
+        diagnostics.notificationChannel = '未创建';
+        renderStatus();
+        throw new Error(`Notification permission check failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    diagnostics.notificationPermission = permissionGranted ? '已允许' : '未允许';
+    if (!permissionGranted) {
+        diagnostics.notificationChannel = '等待权限';
+        renderStatus();
+        throw new Error('TauriTavern notification permission is not granted');
+    }
+
+    if (!notificationBridgeReady) {
+        try {
+            await invoke('plugin:notification|create_channel', {
+                channel: {
+                    id: COMPANION_NOTIFICATION_CHANNEL,
+                    name: '酒馆小伴侣同步（静默）',
+                    description: '仅用于把当前角色名、头像和生成状态交给酒馆小伴侣',
+                    importance: 2,
+                    visibility: -1,
+                    vibration: false,
+                    lights: false,
+                },
+            });
+            notificationBridgeReady = true;
+        } catch (error) {
+            diagnostics.notificationChannel = '创建失败';
+            renderStatus();
+            throw new Error(`Notification channel creation failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    }
+
+    diagnostics.notificationChannel = '已创建';
+    renderStatus();
+    return true;
+}
+
 async function openCompanionInstaller() {
     let openedExternally = false;
     const invoke = getTauriInvoke();
@@ -411,12 +472,14 @@ async function sendSilentNotificationPacket(encodedPacket, notificationId) {
             inboxLines: chunks,
             group: 'tt_companion_bridge',
             autoCancel: true,
+            silent: true,
             visibility: -1,
         },
     });
 }
 
 async function syncThroughSilentNotification(payload) {
+    await ensureTauriNotificationBridge();
     const encodedPayload = JSON.stringify(payload);
     const notificationBase = 10_000 + Math.floor(Math.random() * 1_000_000);
     if (encodedPayload.length <= 13_700) {
@@ -640,12 +703,39 @@ async function postToCompanion(input = {}) {
 
 async function testCompanionConnection() {
     try {
+        if (detectTavernHost().id === 'tt') {
+            await ensureTauriNotificationBridge({ request: true });
+        }
         await postToCompanion();
         notify('success', `已从 ${detectTavernHost().label} 连到小伴侣。`);
     } catch (error) {
         console.warn('[Four Tavern Companion] Connection test failed:', error);
         notify('warning', '没有连到小伴侣。请先在小伴侣里启动悬浮窗，再重新测试。');
     }
+}
+
+async function enableTauriSyncPermission() {
+    try {
+        await ensureTauriNotificationBridge({ request: true });
+        notify('success', 'TauriTavern 通知权限和小伴侣同步频道已经开启。');
+        await syncCurrentCharacter({ force: true });
+    } catch (error) {
+        console.warn('[Four Tavern Companion] Notification permission setup failed:', error);
+        notify('warning', 'TauriTavern 通知权限没有开启。请到手机系统设置中允许 TauriTavern 发送通知。');
+    }
+}
+
+async function manualSyncCurrentCharacter() {
+    if (detectTavernHost().id === 'tt') {
+        try {
+            await ensureTauriNotificationBridge({ request: true });
+        } catch (error) {
+            console.warn('[Four Tavern Companion] Cannot sync without notification permission:', error);
+            notify('warning', '请先开启 TauriTavern 通知权限。');
+            return;
+        }
+    }
+    await syncCurrentCharacter({ force: true });
 }
 
 function imageFromBlob(blob) {
@@ -955,10 +1045,14 @@ async function installSettingsPanel() {
     bindCheckbox('ttka_auto_character_sync', 'autoCharacterSync');
     bindHostMode();
     document.getElementById('ttka_install_companion')?.addEventListener('click', () => void openCompanionInstaller());
+    document.getElementById('ttka_enable_tauri_permission')?.addEventListener('click', () => void enableTauriSyncPermission());
     document.getElementById('ttka_test_companion')?.addEventListener('click', () => void testCompanionConnection());
-    document.getElementById('ttka_sync_companion')?.addEventListener('click', () => void syncCurrentCharacter({ force: true }));
+    document.getElementById('ttka_sync_companion')?.addEventListener('click', () => void manualSyncCurrentCharacter());
     document.getElementById('ttka_copy_report')?.addEventListener('click', () => void copyDiagnostics());
     renderStatus();
+    if (detectTavernHost().id === 'tt') {
+        void ensureTauriNotificationBridge().catch(() => {});
+    }
 }
 
 function installHeartbeatDiagnostics() {

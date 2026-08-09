@@ -15,6 +15,7 @@
 - 生成期间建立完全本地的 WebRTC DataChannel，并保留针对 `flushFrames` 的后台流式缓冲辅助。
 - 不读取或发送聊天内容、角色卡文本和 API 密钥。
 - 设置页提供“下载 / 安装酒馆小伴侣”按钮，打开同一 GitHub 仓库中随扩展更新的最新版 APK。
+- 主动检查并请求 TauriTavern 的 Android 通知权限；发送同步数据前创建专用低优先级静默频道，避免真机因频道不存在而静默丢弃通知。
 
 ## 四端传输
 
@@ -31,6 +32,6 @@ Android 厂商仍可完全冻结后台 WebView。小伴侣的前台服务、局�
 
 ## 安装
 
-将本目录（包括 `TauriTavern-Companion-latest.apk`）发布到 GitHub 后，在每个酒馆的“扩展 → 安装扩展”中粘贴同一个 Git 仓库 URL。版本为 0.12.0。
+将本目录（包括 `TauriTavern-Companion-latest.apk`）发布到 GitHub 后，在每个酒馆的“扩展 → 安装扩展”中粘贴同一个 Git 仓库 URL。版本为 0.13.0。
 
 以后更新时同时覆盖扩展文件和 `TauriTavern-Companion-latest.apk`。用户更新扩展后，在扩展设置中点击“下载 / 安装酒馆小伴侣”，系统浏览器会下载配套 APK；Android 会保留最后一次安装确认。
