@@ -6,11 +6,11 @@ import {
     saveSettingsDebounced,
     this_chid,
 } from '../../../../script.js';
-import { openExternalUrl } from '../../../../tauri-bridge.js';
 import { extension_settings, renderExtensionTemplateAsync } from '../../../extensions.js';
 
 const MODULE_NAME = 'tt-background-keepalive';
 const RESOURCE_NAME = 'third-party/tt-background-keepalive-extension';
+const COMPANION_BRIDGE_URL = 'http://127.0.0.1:18742/sync';
 const DEFAULTS = Object.freeze({
     rtcEnabled: true,
     streamAssist: true,
@@ -32,6 +32,8 @@ const diagnostics = {
     assistedFlushes: 0,
     lastCharacterSyncAt: null,
     lastCharacterSyncKey: '',
+    companionBridgeState: '未测试',
+    companionBridgeError: '',
 };
 
 let rtcPeerA = null;
@@ -81,6 +83,7 @@ function renderStatus() {
     setText('#ttka_generation_state', diagnostics.generationActive ? '正在生成' : '空闲');
     setText('#ttka_visibility_state', document.visibilityState === 'hidden' ? '后台/隐藏' : '可见');
     setText('#ttka_rtc_state', diagnostics.rtcState);
+    setText('#ttka_companion_bridge_state', diagnostics.companionBridgeState);
     setText(
         '#ttka_heartbeat_gap',
         diagnostics.largestHeartbeatGapMs > 0
@@ -237,21 +240,40 @@ async function stopAudioFallback() {
     audioContext = null;
 }
 
-function buildCompanionUri({ name = '', avatar = '', action = 'sync' } = {}) {
-    const query = new URLSearchParams({
-        name: String(name).slice(0, 80),
-        avatar,
-        wake: '600',
-    });
-    return `ttcompanion://${action}?${query.toString()}`;
-}
-
-async function openCompanion(uri) {
+async function postToCompanion({ name = '', avatar = '' } = {}) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2500);
     try {
-        await openExternalUrl(uri);
+        const response = await fetch(`${COMPANION_BRIDGE_URL}?t=${Date.now()}`, {
+            method: 'POST',
+            mode: 'cors',
+            cache: 'no-store',
+            credentials: 'omit',
+            referrerPolicy: 'no-referrer',
+            headers: {
+                'Content-Type': 'text/plain;charset=UTF-8',
+            },
+            body: JSON.stringify({
+                name: String(name).slice(0, 80),
+                avatar,
+                wake: 600,
+            }),
+            signal: controller.signal,
+        });
+        if (!response.ok) {
+            throw new Error(`Companion bridge returned ${response.status}`);
+        }
+        diagnostics.companionBridgeState = '已连接';
+        diagnostics.companionBridgeError = '';
+        renderStatus();
+        return true;
     } catch (error) {
-        console.debug('[TT Keepalive] Native opener rejected custom scheme, using location fallback.', error);
-        window.location.assign(uri);
+        diagnostics.companionBridgeState = '未连接';
+        diagnostics.companionBridgeError = error instanceof Error ? error.message : String(error);
+        renderStatus();
+        throw error;
+    } finally {
+        clearTimeout(timeout);
     }
 }
 
@@ -286,8 +308,8 @@ async function makeAvatarThumbnail(avatarFile) {
     const sourceX = Math.max(0, (image.naturalWidth - side) / 2);
     const sourceY = Math.max(0, (image.naturalHeight - side) / 2);
     const canvas = document.createElement('canvas');
-    canvas.width = 144;
-    canvas.height = 144;
+    canvas.width = 112;
+    canvas.height = 112;
     const context = canvas.getContext('2d', { alpha: false });
     context.fillStyle = '#f8efe9';
     context.fillRect(0, 0, canvas.width, canvas.height);
@@ -315,7 +337,7 @@ async function syncCurrentCharacter({ quiet = false, force = false } = {}) {
     characterSyncInFlight = true;
     try {
         const avatar = await makeAvatarThumbnail(character.avatar);
-        await openCompanion(buildCompanionUri({ name: character.name, avatar }));
+        await postToCompanion({ name: character.name, avatar });
         lastSyncedCharacterKey = syncKey;
         diagnostics.lastCharacterSyncKey = syncKey;
         diagnostics.lastCharacterSyncAt = new Date().toISOString();
@@ -325,9 +347,13 @@ async function syncCurrentCharacter({ quiet = false, force = false } = {}) {
         return true;
     } catch (error) {
         console.warn('[TT Keepalive] Character sync failed:', error);
-        await openCompanion(buildCompanionUri({ name: character.name, action: 'wake' }));
+        try {
+            await postToCompanion({ name: character.name });
+        } catch {
+            // The companion may simply not be running. Never navigate TT away as a fallback.
+        }
         if (!quiet) {
-            notify('warning', '头像同步失败，但已尝试启动小伴侣。');
+            notify('warning', '没有连到小伴侣。请先打开新版小伴侣并启动悬浮窗，再重试。');
         }
         return false;
     } finally {
@@ -354,7 +380,7 @@ function scheduleAutomaticCharacterSync(delay = 650) {
 
 function diagnosticReport() {
     return JSON.stringify({
-        extensionVersion: '0.2.0',
+        extensionVersion: '0.3.0',
         userAgent: navigator.userAgent,
         visibility: document.visibilityState,
         settings: { ...settings() },
