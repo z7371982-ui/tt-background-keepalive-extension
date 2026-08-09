@@ -419,13 +419,30 @@ async function makeAvatarThumbnail(avatarFile) {
     const sourceX = Math.max(0, (image.naturalWidth - side) / 2);
     const sourceY = Math.max(0, (image.naturalHeight - side) / 2);
     const canvas = document.createElement('canvas');
-    canvas.width = 64;
-    canvas.height = 64;
-    const context = canvas.getContext('2d', { alpha: false });
-    context.fillStyle = '#f8efe9';
-    context.fillRect(0, 0, canvas.width, canvas.height);
-    context.drawImage(image, sourceX, sourceY, side, side, 0, 0, canvas.width, canvas.height);
-    return canvas.toDataURL('image/jpeg', 0.62).split(',')[1] || '';
+    const sizes = [144, 136, 128, 112, 96];
+    const qualities = [0.82, 0.74, 0.66, 0.58];
+    let fallback = '';
+
+    for (const size of sizes) {
+        canvas.width = size;
+        canvas.height = size;
+        const context = canvas.getContext('2d', { alpha: false });
+        context.imageSmoothingEnabled = true;
+        context.imageSmoothingQuality = 'high';
+        context.fillStyle = '#f8efe9';
+        context.fillRect(0, 0, size, size);
+        context.drawImage(image, sourceX, sourceY, side, side, 0, 0, size, size);
+
+        for (const quality of qualities) {
+            const encoded = canvas.toDataURL('image/jpeg', quality).split(',')[1] || '';
+            fallback = encoded || fallback;
+            if (encoded.length > 0 && encoded.length <= 13_700) {
+                return encoded;
+            }
+        }
+    }
+
+    return fallback;
 }
 
 async function syncCurrentCharacter({ quiet = false, force = false, event = '' } = {}) {
@@ -497,7 +514,7 @@ function scheduleAutomaticCharacterSync(delay = 650) {
 
 function diagnosticReport() {
     return JSON.stringify({
-        extensionVersion: '0.5.0',
+        extensionVersion: '0.6.0',
         userAgent: navigator.userAgent,
         visibility: document.visibilityState,
         settings: { ...settings() },
@@ -574,11 +591,11 @@ async function onGenerationStarted(_type, _params, isDryRun) {
     diagnostics.generationStartedAt = new Date().toISOString();
     diagnostics.generationEndedAt = null;
     renderStatus();
-    await Promise.allSettled([startRtcGuard(), startAudioFallback()]);
 
     if (settings().autoWake) {
         void syncCurrentCharacter({ quiet: true, force: true, event: 'generating' });
     }
+    await Promise.allSettled([startRtcGuard(), startAudioFallback()]);
 }
 
 async function stopGenerationGuards(companionEvent) {
@@ -588,9 +605,20 @@ async function stopGenerationGuards(companionEvent) {
     await stopAudioFallback();
     renderStatus();
     if (settings().autoWake) {
-        void postToCompanion({ event: companionEvent }).catch(error => {
-            console.warn('[TT Keepalive] Companion generation event failed:', error);
-        });
+        void postToCompanion({ event: companionEvent })
+            .then(() => {
+                if (document.visibilityState !== 'visible') {
+                    return;
+                }
+                setTimeout(() => {
+                    if (!diagnostics.generationActive && document.visibilityState === 'visible') {
+                        void postToCompanion({ event: 'viewed' }).catch(() => {});
+                    }
+                }, 1800);
+            })
+            .catch(error => {
+                console.warn('[TT Keepalive] Companion generation event failed:', error);
+            });
     }
 }
 
@@ -676,6 +704,11 @@ function installHeartbeatDiagnostics() {
         );
         diagnostics.lastHeartbeatAt = now;
         renderStatus();
+        if (document.visibilityState === 'visible'
+            && !diagnostics.generationActive
+            && settings().autoWake) {
+            void postToCompanion({ event: 'viewed' }).catch(() => {});
+        }
     });
 }
 
