@@ -1,0 +1,57 @@
+#tt_keepalive_settings .inline-drawer-content {
+  padding: 0.75rem;
+}
+
+#tt_keepalive_settings .ttka-note {
+  margin: 0 0 0.75rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--SmartThemeQuoteColor) 45%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 80%, transparent);
+  line-height: 1.45;
+}
+
+#tt_keepalive_settings .checkbox_label {
+  margin-top: 0.7rem;
+}
+
+#tt_keepalive_settings small {
+  display: block;
+  margin: 0.18rem 0 0.5rem 1.8rem;
+  opacity: 0.78;
+  line-height: 1.4;
+}
+
+#tt_keepalive_settings .ttka-status {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.45rem;
+  margin: 0.8rem 0;
+  padding: 0.7rem;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--SmartThemeBotMesBlurTintColor) 75%, transparent);
+}
+
+#tt_keepalive_settings .ttka-status div {
+  min-width: 0;
+}
+
+#tt_keepalive_settings .ttka-status span {
+  opacity: 0.72;
+}
+
+#tt_keepalive_settings .ttka-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+}
+
+@media (max-width: 520px) {
+  #tt_keepalive_settings .ttka-status {
+    grid-template-columns: 1fr;
+  }
+
+  #tt_keepalive_settings .ttka-actions .menu_button {
+    width: 100%;
+  }
+}

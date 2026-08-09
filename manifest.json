@@ -1,0 +1,11 @@
+{
+  "display_name": "TT 后台保活实验",
+  "loading_order": 1,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "cicimil + Codex",
+  "version": "0.2.0",
+  "description": "生成期间用本地 WebRTC DataChannel 尽量保持 Android WebView 调度，并自动同步当前角色头像到独立 TT 小伴侣。"
+}

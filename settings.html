@@ -1,0 +1,59 @@
+<div id="tt_keepalive_settings" class="ttka-panel">
+  <div class="inline-drawer">
+    <div class="inline-drawer-toggle inline-drawer-header">
+      <b>TT 后台保活实验</b>
+      <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+    </div>
+    <div class="inline-drawer-content">
+      <p class="ttka-note">只在生成期间工作，不接管模型请求，也不读取聊天内容。不同手机厂商对后台 WebView 的限制不同，所以首版同时记录冻结间隔，方便判断是否有效。</p>
+
+      <label class="checkbox_label">
+        <input id="ttka_rtc_enabled" type="checkbox">
+        <span>本地 WebRTC 保活（推荐）</span>
+      </label>
+      <small>在 TT 内部建立不联网、不调用摄像头或麦克风的自连接 DataChannel。</small>
+
+      <label class="checkbox_label">
+        <input id="ttka_stream_assist" type="checkbox">
+        <span>隐藏时立即冲刷 TT 的 10ms 文本缓冲</span>
+      </label>
+      <small>只识别 TT 自己的 <code>flushFrames</code> 定时器，不改其它插件的定时器。</small>
+
+      <label class="checkbox_label">
+        <input id="ttka_audio_fallback" type="checkbox">
+        <span>超低音频增强（失败后再试）</span>
+      </label>
+      <small>可能与抖音等媒体 App 的音频策略冲突，默认关闭。</small>
+
+      <label class="checkbox_label">
+        <input id="ttka_auto_wake" type="checkbox">
+        <span>生成开始时自动让小伴侣续保 10 分钟</span>
+      </label>
+
+      <label class="checkbox_label">
+        <input id="ttka_auto_character_sync" type="checkbox">
+        <span>打开或切换角色时自动同步头像（推荐）</span>
+      </label>
+      <small>只传角色名和一张 144×144 压缩头像，不传角色卡内容或聊天记录。</small>
+
+      <div class="ttka-status" aria-live="polite">
+        <div><span>生成：</span><strong id="ttka_generation_state">空闲</strong></div>
+        <div><span>页面：</span><strong id="ttka_visibility_state">可见</strong></div>
+        <div><span>WebRTC：</span><strong id="ttka_rtc_state">未启动</strong></div>
+        <div><span>最大心跳间隔：</span><strong id="ttka_heartbeat_gap">—</strong></div>
+      </div>
+
+      <div class="ttka-actions">
+        <button id="ttka_sync_companion" class="menu_button menu_button_icon" type="button">
+          <i class="fa-solid fa-image"></i>
+          <span>立即重新同步当前角色</span>
+        </button>
+        <button id="ttka_copy_report" class="menu_button menu_button_icon" type="button">
+          <i class="fa-solid fa-clipboard"></i>
+          <span>复制诊断</span>
+        </button>
+      </div>
+      <small>小伴侣单击会互动并续保，双击回到原 TT；头像只传一张压缩缩略图。</small>
+    </div>
+  </div>
+</div>
