@@ -14,12 +14,12 @@ const COMPANION_BRIDGE_URL = 'http://127.0.0.1:18742/sync';
 const COMPANION_FORM_BRIDGE_URL = 'http://127.0.0.1:18742/form-sync';
 const COMPANION_REGISTER_URL = 'http://127.0.0.1:18742/register';
 const COMPANION_CONTENT_URL = 'content://com.cicimil.ttcompanion.bridge/sync';
-const COMPANION_APK_VERSION = '1.3.0';
+const COMPANION_APK_VERSION = '1.3.1';
 const COMPANION_APK_URL = 'https://raw.githubusercontent.com/z7371982-ui/tt-background-keepalive-extension/main/TauriTavern-Companion-latest.apk';
 const COMPANION_NOTIFICATION_TITLE = 'TT_COMPANION_SYNC_V1';
 const COMPANION_NOTIFICATION_CHANNEL = 'four_tavern_companion_sync';
 const COMPANION_PACKET_CHARS = 11_000;
-const EXTENSION_VERSION = '0.14.0';
+const EXTENSION_VERSION = '0.14.1';
 const DEFAULTS = Object.freeze({
     rtcEnabled: true,
     streamAssist: true,
@@ -61,6 +61,7 @@ let characterSyncTimer = null;
 let characterSyncInFlight = false;
 let lastSyncedCharacterKey = '';
 let notificationBridgeReady = false;
+let notificationChannelAttempted = false;
 
 function collectAccessibleWindows(startWindow = window) {
     const windows = [];
@@ -394,28 +395,29 @@ async function ensureTauriNotificationBridge({ request = false } = {}) {
         throw new Error('TauriTavern notification permission is not granted');
     }
 
-    if (!notificationBridgeReady) {
+    if (!notificationChannelAttempted) {
+        notificationChannelAttempted = true;
         try {
             await invoke('plugin:notification|create_channel', {
-                channel: {
-                    id: COMPANION_NOTIFICATION_CHANNEL,
-                    name: '酒馆小伴侣同步（静默）',
-                    description: '仅用于把当前角色名、头像和生成状态交给酒馆小伴侣',
-                    importance: 2,
-                    visibility: -1,
-                    vibration: false,
-                    lights: false,
-                },
+                id: COMPANION_NOTIFICATION_CHANNEL,
+                name: '酒馆小伴侣同步（静默）',
+                description: '仅用于把当前角色名、头像和生成状态交给酒馆小伴侣',
+                importance: 2,
+                visibility: -1,
+                vibration: false,
+                lights: false,
             });
             notificationBridgeReady = true;
         } catch (error) {
-            diagnostics.notificationChannel = '创建失败';
-            renderStatus();
-            throw new Error(`Notification channel creation failed: ${error instanceof Error ? error.message : String(error)}`);
+            notificationBridgeReady = false;
+            console.warn(
+                '[Four Tavern Companion] Custom notification channel unavailable; using the TauriTavern default channel:',
+                error,
+            );
         }
     }
 
-    diagnostics.notificationChannel = '已创建';
+    diagnostics.notificationChannel = notificationBridgeReady ? '已创建' : '使用默认频道';
     renderStatus();
     return true;
 }
@@ -463,19 +465,20 @@ async function sendSilentNotificationPacket(encodedPacket, notificationId) {
         throw new Error('Companion payload is too large');
     }
 
-    await invoke('plugin:notification|notify', {
-        options: {
-            id: notificationId,
-            channelId: COMPANION_NOTIFICATION_CHANNEL,
-            title: COMPANION_NOTIFICATION_TITLE,
-            body: 'TauriTavern 小伴侣正在同步',
-            inboxLines: chunks,
-            group: 'tt_companion_bridge',
-            autoCancel: true,
-            silent: true,
-            visibility: -1,
-        },
-    });
+    const options = {
+        id: notificationId,
+        title: COMPANION_NOTIFICATION_TITLE,
+        body: 'TauriTavern 小伴侣正在同步',
+        inboxLines: chunks,
+        group: 'tt_companion_bridge',
+        autoCancel: true,
+        silent: true,
+        visibility: -1,
+    };
+    if (notificationBridgeReady) {
+        options.channelId = COMPANION_NOTIFICATION_CHANNEL;
+    }
+    await invoke('plugin:notification|notify', { options });
 }
 
 async function syncThroughSilentNotification(payload) {
@@ -717,11 +720,15 @@ async function testCompanionConnection() {
 async function enableTauriSyncPermission() {
     try {
         await ensureTauriNotificationBridge({ request: true });
-        notify('success', 'TauriTavern 通知权限和小伴侣同步频道已经开启。');
+        notify('success', `TauriTavern 通知权限已允许；同步频道：${diagnostics.notificationChannel}。`);
         await syncCurrentCharacter({ force: true });
     } catch (error) {
         console.warn('[Four Tavern Companion] Notification permission setup failed:', error);
-        notify('warning', 'TauriTavern 通知权限没有开启。请到手机系统设置中允许 TauriTavern 发送通知。');
+        if (diagnostics.notificationPermission === '未允许') {
+            notify('warning', 'TauriTavern 通知权限没有开启。请到手机系统设置中允许 TauriTavern 发送通知。');
+        } else {
+            notify('warning', `TauriTavern 通知已允许，但同步初始化失败：${error instanceof Error ? error.message : String(error)}`);
+        }
     }
 }
 
