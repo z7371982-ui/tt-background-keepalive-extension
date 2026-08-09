@@ -11,6 +11,7 @@ import { extension_settings, renderExtensionTemplateAsync } from '../../../exten
 const MODULE_NAME = 'tt-background-keepalive';
 const RESOURCE_NAME = 'third-party/tt-background-keepalive-extension';
 const COMPANION_BRIDGE_URL = 'http://127.0.0.1:18742/sync';
+const COMPANION_CONTENT_URL = 'content://com.cicimil.ttcompanion.bridge/sync';
 const DEFAULTS = Object.freeze({
     rtcEnabled: true,
     streamAssist: true,
@@ -240,40 +241,93 @@ async function stopAudioFallback() {
     audioContext = null;
 }
 
-async function postToCompanion({ name = '', avatar = '' } = {}) {
+function companionPayload({ name = '', avatar = '' } = {}) {
+    return {
+        name: String(name).slice(0, 80),
+        avatar,
+        wake: 600,
+    };
+}
+
+function syncThroughAndroidContentProvider(payload) {
+    return new Promise((resolve, reject) => {
+        const image = new Image();
+        const timeout = setTimeout(() => {
+            cleanup();
+            reject(new Error('Android content bridge timed out'));
+        }, 2200);
+        const cleanup = () => {
+            clearTimeout(timeout);
+            image.onload = null;
+            image.onerror = null;
+            image.remove();
+        };
+        image.onload = () => {
+            cleanup();
+            resolve(true);
+        };
+        image.onerror = () => {
+            cleanup();
+            reject(new Error('Android content bridge unavailable'));
+        };
+        image.alt = '';
+        image.setAttribute('aria-hidden', 'true');
+        image.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;left:-10px;top:-10px';
+        const query = new URLSearchParams({
+            name: payload.name,
+            avatar: payload.avatar,
+            wake: String(payload.wake),
+            t: String(Date.now()),
+        });
+        image.src = `${COMPANION_CONTENT_URL}?${query.toString()}`;
+        (document.body || document.documentElement).append(image);
+    });
+}
+
+async function syncThroughLoopback(payload) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 2500);
     try {
-        const response = await fetch(`${COMPANION_BRIDGE_URL}?t=${Date.now()}`, {
+        await fetch(`${COMPANION_BRIDGE_URL}?t=${Date.now()}`, {
             method: 'POST',
-            mode: 'cors',
+            mode: 'no-cors',
             cache: 'no-store',
             credentials: 'omit',
             referrerPolicy: 'no-referrer',
-            headers: {
-                'Content-Type': 'text/plain;charset=UTF-8',
-            },
-            body: JSON.stringify({
-                name: String(name).slice(0, 80),
-                avatar,
-                wake: 600,
-            }),
+            body: JSON.stringify(payload),
             signal: controller.signal,
         });
-        if (!response.ok) {
-            throw new Error(`Companion bridge returned ${response.status}`);
-        }
-        diagnostics.companionBridgeState = '已连接';
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+async function postToCompanion(input = {}) {
+    const payload = companionPayload(input);
+    let contentError = null;
+    try {
+        await syncThroughAndroidContentProvider(payload);
+        diagnostics.companionBridgeState = '已连接（系统通道）';
         diagnostics.companionBridgeError = '';
         renderStatus();
         return true;
     } catch (error) {
-        diagnostics.companionBridgeState = '未连接';
-        diagnostics.companionBridgeError = error instanceof Error ? error.message : String(error);
+        contentError = error;
+    }
+
+    try {
+        await syncThroughLoopback(payload);
+        diagnostics.companionBridgeState = '已连接（兼容通道）';
+        diagnostics.companionBridgeError = '';
         renderStatus();
-        throw error;
-    } finally {
-        clearTimeout(timeout);
+        return true;
+    } catch (error) {
+        const contentMessage = contentError instanceof Error ? contentError.message : String(contentError || 'unknown');
+        const loopbackMessage = error instanceof Error ? error.message : String(error);
+        diagnostics.companionBridgeState = '未连接';
+        diagnostics.companionBridgeError = `${contentMessage}; ${loopbackMessage}`;
+        renderStatus();
+        throw new Error(diagnostics.companionBridgeError);
     }
 }
 
@@ -380,7 +434,7 @@ function scheduleAutomaticCharacterSync(delay = 650) {
 
 function diagnosticReport() {
     return JSON.stringify({
-        extensionVersion: '0.3.0',
+        extensionVersion: '0.4.0',
         userAgent: navigator.userAgent,
         visibility: document.visibilityState,
         settings: { ...settings() },
