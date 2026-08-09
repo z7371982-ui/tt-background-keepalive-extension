@@ -1,23 +1,33 @@
 <div id="tt_keepalive_settings" class="ttka-panel">
   <div class="inline-drawer">
     <div class="inline-drawer-toggle inline-drawer-header">
-      <b>TT 后台保活实验</b>
+      <b>四端酒馆小伴侣联动</b>
       <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
     </div>
     <div class="inline-drawer-content">
-      <p class="ttka-note">只在生成期间工作，不接管模型请求，也不读取聊天内容。不同手机厂商对后台 WebView 的限制不同，所以首版同时记录冻结间隔，方便判断是否有效。</p>
+      <p class="ttka-note">支持 SillyTavern、Luker、Termux 与 TT。只同步当前角色名、头像、生成状态和返回地址，不接管模型请求，也不读取聊天内容。</p>
+
+      <label for="ttka_host_mode">酒馆端识别</label>
+      <select id="ttka_host_mode" class="text_pole">
+        <option value="auto">自动识别（推荐）</option>
+        <option value="sillytavern">SillyTavern</option>
+        <option value="luker">Luker</option>
+        <option value="termux">Termux 酒馆</option>
+        <option value="tt">TT</option>
+      </select>
+      <small>自动识别不准时可以手动指定；改完会立即重新同步当前角色和返回地址。</small>
 
       <label class="checkbox_label">
         <input id="ttka_rtc_enabled" type="checkbox">
         <span>本地 WebRTC 保活（推荐）</span>
       </label>
-      <small>在 TT 内部建立不联网、不调用摄像头或麦克风的自连接 DataChannel。</small>
+      <small>在当前酒馆页面内部建立不联网、不调用摄像头或麦克风的自连接 DataChannel。</small>
 
       <label class="checkbox_label">
         <input id="ttka_stream_assist" type="checkbox">
-        <span>隐藏时立即冲刷 TT 的 10ms 文本缓冲</span>
+        <span>隐藏时立即冲刷酒馆的 10ms 文本缓冲</span>
       </label>
-      <small>只识别 TT 自己的 <code>flushFrames</code> 定时器，不改其它插件的定时器。</small>
+      <small>只识别酒馆流式输出使用的 <code>flushFrames</code> 定时器，不改其它插件的定时器。</small>
 
       <label class="checkbox_label">
         <input id="ttka_audio_fallback" type="checkbox">
@@ -37,6 +47,7 @@
       <small>直接读取角色原头像而不是酒馆缩略图，生成最高 384×384、90% 质量的显示图，并通过静默分片传输；不传角色卡内容或聊天记录。</small>
 
       <div class="ttka-status" aria-live="polite">
+        <div><span>当前端：</span><strong id="ttka_host_state">识别中</strong></div>
         <div><span>生成：</span><strong id="ttka_generation_state">空闲</strong></div>
         <div><span>页面：</span><strong id="ttka_visibility_state">可见</strong></div>
         <div><span>WebRTC：</span><strong id="ttka_rtc_state">未启动</strong></div>
@@ -54,7 +65,7 @@
           <span>复制诊断</span>
         </button>
       </div>
-      <small>小伴侣单击会互动并续保，双击回到原 TT；生成中显示转动圆环，完成后绿色勾会保留，回到 TT 时自动清掉。</small>
+      <small>双击小伴侣会返回最近联动的酒馆端；生成中显示转动圆环，完成后绿色勾会保留，回到酒馆时自动清掉。</small>
     </div>
   </div>
 </div>

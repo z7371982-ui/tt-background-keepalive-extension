@@ -16,12 +16,14 @@ const COMPANION_NOTIFICATION_TITLE = 'TT_COMPANION_SYNC_V1';
 const COMPANION_NOTIFICATION_CHANNEL = 'tauritavern_ai_generation_keepalive';
 const COMPANION_NOTIFICATION_ID = 2408;
 const COMPANION_PACKET_CHARS = 11_000;
+const EXTENSION_VERSION = '0.9.0';
 const DEFAULTS = Object.freeze({
     rtcEnabled: true,
     streamAssist: true,
     audioFallback: false,
     autoWake: true,
     autoCharacterSync: true,
+    hostMode: 'auto',
 });
 
 const diagnostics = {
@@ -54,6 +56,89 @@ let characterSyncTimer = null;
 let characterSyncInFlight = false;
 let lastSyncedCharacterKey = '';
 
+function collectAccessibleWindows(startWindow = window) {
+    const windows = [];
+    let current = startWindow;
+    while (current && !windows.includes(current)) {
+        windows.push(current);
+        try {
+            const parent = current.parent;
+            if (!parent || parent === current || !parent.document) {
+                break;
+            }
+            void parent.document.documentElement;
+            current = parent;
+        } catch {
+            break;
+        }
+    }
+    return windows;
+}
+
+function detectTavernHost() {
+    const override = extension_settings[MODULE_NAME]?.hostMode;
+    const manualHosts = {
+        tt: { id: 'tt', label: 'TT' },
+        luker: { id: 'luker', label: 'Luker' },
+        termux: { id: 'termux', label: 'Termux 酒馆' },
+        sillytavern: { id: 'sillytavern', label: 'SillyTavern' },
+    };
+    if (manualHosts[override]) {
+        return manualHosts[override];
+    }
+
+    const windows = collectAccessibleWindows();
+    const isTt = windows.some(owner => {
+        try {
+            return owner?.__TAURI_RUNNING__ === true
+                || Boolean(owner?.__TAURITAVERN__)
+                || Boolean(owner?.__TAURI_INTERNALS__);
+        } catch {
+            return false;
+        }
+    });
+    if (isTt) {
+        return { id: 'tt', label: 'TT' };
+    }
+
+    const isLuker = windows.some(owner => {
+        try {
+            return typeof owner?.Luker?.getContext === 'function';
+        } catch {
+            return false;
+        }
+    });
+    if (isLuker) {
+        return { id: 'luker', label: 'Luker' };
+    }
+
+    const hostname = String(location.hostname || '').toLowerCase();
+    const isLoopback = hostname === 'localhost'
+        || hostname === '127.0.0.1'
+        || hostname === '::1'
+        || hostname.endsWith('.localhost');
+    if (/Android/i.test(navigator.userAgent) && isLoopback) {
+        return { id: 'termux', label: 'Termux 酒馆' };
+    }
+    return { id: 'sillytavern', label: 'SillyTavern' };
+}
+
+function currentReturnUrl() {
+    try {
+        const url = new URL(location.href);
+        if (!['http:', 'https:'].includes(url.protocol)) {
+            return '';
+        }
+        url.username = '';
+        url.password = '';
+        url.search = '';
+        url.hash = '';
+        return url.toString().slice(0, 2048);
+    } catch {
+        return '';
+    }
+}
+
 function settings() {
     if (!extension_settings[MODULE_NAME]) {
         extension_settings[MODULE_NAME] = structuredClone(DEFAULTS);
@@ -64,11 +149,14 @@ function settings() {
             extension_settings[MODULE_NAME][key] = value;
         }
     }
+    if (!['auto', 'tt', 'luker', 'termux', 'sillytavern'].includes(extension_settings[MODULE_NAME].hostMode)) {
+        extension_settings[MODULE_NAME].hostMode = 'auto';
+    }
 
     return extension_settings[MODULE_NAME];
 }
 
-function notify(level, message, title = 'TT 后台保活') {
+function notify(level, message, title = '四端酒馆小伴侣') {
     const toast = globalThis.toastr?.[level];
     if (typeof toast === 'function') {
         toast(message, title);
@@ -89,6 +177,7 @@ function renderStatus() {
     setText('#ttka_visibility_state', document.visibilityState === 'hidden' ? '后台/隐藏' : '可见');
     setText('#ttka_rtc_state', diagnostics.rtcState);
     setText('#ttka_companion_bridge_state', diagnostics.companionBridgeState);
+    setText('#ttka_host_state', detectTavernHost().label);
     setText(
         '#ttka_heartbeat_gap',
         diagnostics.largestHeartbeatGapMs > 0
@@ -198,7 +287,7 @@ async function startRtcGuard() {
         const message = error instanceof Error ? error.message : String(error);
         closeRtcGuard();
         updateRtcState('连接失败', message);
-        console.warn('[TT Keepalive] WebRTC guard failed:', error);
+        console.warn('[Four Tavern Companion] WebRTC guard failed:', error);
     }
 }
 
@@ -224,7 +313,7 @@ async function startAudioFallback() {
         audioOscillator.start();
         await audioContext.resume();
     } catch (error) {
-        console.warn('[TT Keepalive] Audio fallback failed:', error);
+        console.warn('[Four Tavern Companion] Audio fallback failed:', error);
         await stopAudioFallback();
     }
 }
@@ -246,10 +335,14 @@ async function stopAudioFallback() {
 }
 
 function companionPayload({ name = '', avatar = '', event = '' } = {}) {
+    const host = detectTavernHost();
     return {
         name: String(name).slice(0, 80),
         avatar,
         event: String(event).slice(0, 24),
+        source: host.id,
+        sourceLabel: host.label,
+        returnUrl: currentReturnUrl(),
         wake: 600,
     };
 }
@@ -347,6 +440,8 @@ function syncThroughAndroidContentProvider(payload) {
             name: payload.name,
             avatar: payload.avatar,
             event: payload.event,
+            source: payload.source,
+            returnUrl: payload.returnUrl,
             wake: String(payload.wake),
             t: String(Date.now()),
         });
@@ -375,45 +470,35 @@ async function syncThroughLoopback(payload) {
 
 async function postToCompanion(input = {}) {
     const payload = companionPayload(input);
-    let notificationError = null;
-    try {
-        await syncThroughSilentNotification(payload);
-        diagnostics.companionBridgeState = '已发送（静默通知联动）';
-        diagnostics.companionBridgeError = '';
-        renderStatus();
+    const errors = [];
+    const tryTransport = async (label, transport) => {
+        try {
+            await transport(payload);
+            diagnostics.companionBridgeState = `已连接（${label}）`;
+            diagnostics.companionBridgeError = '';
+            renderStatus();
+            return true;
+        } catch (error) {
+            errors.push(`${label}: ${error instanceof Error ? error.message : String(error)}`);
+            return false;
+        }
+    };
+
+    if (payload.source === 'tt'
+        && await tryTransport('TT 静默通知', syncThroughSilentNotification)) {
         return true;
-    } catch (error) {
-        notificationError = error;
+    }
+    if (await tryTransport('四端本机通道', syncThroughLoopback)) {
+        return true;
+    }
+    if (await tryTransport('Android 系统通道', syncThroughAndroidContentProvider)) {
+        return true;
     }
 
-    let contentError = null;
-    try {
-        await syncThroughAndroidContentProvider(payload);
-        diagnostics.companionBridgeState = '已连接（系统通道）';
-        diagnostics.companionBridgeError = '';
-        renderStatus();
-        return true;
-    } catch (error) {
-        contentError = error;
-    }
-
-    try {
-        await syncThroughLoopback(payload);
-        diagnostics.companionBridgeState = '已连接（兼容通道）';
-        diagnostics.companionBridgeError = '';
-        renderStatus();
-        return true;
-    } catch (error) {
-        const notificationMessage = notificationError instanceof Error
-            ? notificationError.message
-            : String(notificationError || 'unknown');
-        const contentMessage = contentError instanceof Error ? contentError.message : String(contentError || 'unknown');
-        const loopbackMessage = error instanceof Error ? error.message : String(error);
-        diagnostics.companionBridgeState = '未连接';
-        diagnostics.companionBridgeError = `${notificationMessage}; ${contentMessage}; ${loopbackMessage}`;
-        renderStatus();
-        throw new Error(diagnostics.companionBridgeError);
-    }
+    diagnostics.companionBridgeState = '未连接';
+    diagnostics.companionBridgeError = errors.join('; ');
+    renderStatus();
+    throw new Error(diagnostics.companionBridgeError);
 }
 
 function imageFromBlob(blob) {
@@ -444,7 +529,7 @@ async function makeAvatarThumbnail(avatarFile) {
             image = await imageFromBlob(await originalResponse.blob());
         }
     } catch {
-        // Fall back to the thumbnail endpoint on non-TT SillyTavern hosts.
+        // Fall back to the thumbnail endpoint on hosts that hide original avatars.
     }
     if (!image) {
         const thumbnailResponse = await fetch(getThumbnailUrl('avatar', avatarFile));
@@ -505,11 +590,11 @@ async function syncCurrentCharacter({ quiet = false, force = false, event = '' }
         }
         return true;
     } catch (error) {
-        console.warn('[TT Keepalive] Character sync failed:', error);
+        console.warn('[Four Tavern Companion] Character sync failed:', error);
         try {
             await postToCompanion({ name: character.name, event });
         } catch {
-            // The companion may simply not be running. Never navigate TT away as a fallback.
+            // The companion may simply not be running. Never navigate the tavern away as a fallback.
         }
         if (!quiet) {
             notify('warning', '没有连到小伴侣。请先打开新版小伴侣并启动悬浮窗，再重试。');
@@ -539,7 +624,9 @@ function scheduleAutomaticCharacterSync(delay = 650) {
 
 function diagnosticReport() {
     return JSON.stringify({
-        extensionVersion: '0.8.0',
+        extensionVersion: EXTENSION_VERSION,
+        tavernHost: detectTavernHost(),
+        returnUrl: currentReturnUrl(),
         userAgent: navigator.userAgent,
         visibility: document.visibilityState,
         settings: { ...settings() },
@@ -554,7 +641,7 @@ async function copyDiagnostics() {
         notify('success', '诊断信息已复制。');
     } catch {
         notify('error', '复制失败，请在控制台查看诊断。');
-        console.info('[TT Keepalive diagnostic]', diagnosticReport());
+        console.info('[Four Tavern Companion diagnostic]', diagnosticReport());
     }
 }
 
@@ -624,6 +711,9 @@ async function onGenerationStarted(_type, _params, isDryRun) {
 }
 
 async function stopGenerationGuards(companionEvent) {
+    if (!diagnostics.generationActive) {
+        return;
+    }
     diagnostics.generationActive = false;
     diagnostics.generationEndedAt = new Date().toISOString();
     closeRtcGuard();
@@ -642,7 +732,7 @@ async function stopGenerationGuards(companionEvent) {
                 }, 1800);
             })
             .catch(error => {
-                console.warn('[TT Keepalive] Companion generation event failed:', error);
+                console.warn('[Four Tavern Companion] Generation event failed:', error);
             });
     }
 }
@@ -688,6 +778,21 @@ function bindCheckbox(id, key) {
     });
 }
 
+function bindHostMode() {
+    const select = document.getElementById('ttka_host_mode');
+    if (!(select instanceof HTMLSelectElement)) {
+        return;
+    }
+    select.value = String(settings().hostMode || 'auto');
+    select.addEventListener('change', () => {
+        settings().hostMode = select.value;
+        lastSyncedCharacterKey = '';
+        saveSettingsDebounced();
+        renderStatus();
+        scheduleAutomaticCharacterSync(50);
+    });
+}
+
 async function installSettingsPanel() {
     const target = document.querySelector('#extensions_settings2, #extensions_settings');
     if (!target || document.getElementById('tt_keepalive_settings')) {
@@ -701,6 +806,7 @@ async function installSettingsPanel() {
     bindCheckbox('ttka_audio_fallback', 'audioFallback');
     bindCheckbox('ttka_auto_wake', 'autoWake');
     bindCheckbox('ttka_auto_character_sync', 'autoCharacterSync');
+    bindHostMode();
     document.getElementById('ttka_sync_companion')?.addEventListener('click', () => void syncCurrentCharacter({ force: true }));
     document.getElementById('ttka_copy_report')?.addEventListener('click', () => void copyDiagnostics());
     renderStatus();
@@ -742,6 +848,13 @@ installHeartbeatDiagnostics();
 eventSource.on(event_types.GENERATION_STARTED, onGenerationStarted);
 eventSource.on(event_types.GENERATION_ENDED, onGenerationEnded);
 eventSource.on(event_types.GENERATION_STOPPED, onGenerationStopped);
+if (event_types.MESSAGE_RECEIVED) {
+    eventSource.on(event_types.MESSAGE_RECEIVED, () => {
+        if (diagnostics.generationActive) {
+            void onGenerationEnded();
+        }
+    });
+}
 eventSource.on(event_types.CHAT_CHANGED, () => scheduleAutomaticCharacterSync());
 eventSource.on(event_types.CHAT_LOADED, () => scheduleAutomaticCharacterSync());
 eventSource.on(event_types.CHARACTER_PAGE_LOADED, () => scheduleAutomaticCharacterSync());
@@ -752,7 +865,7 @@ jQuery(async () => {
     try {
         await (globalThis.__TAURITAVERN__?.ready ?? globalThis.__TAURITAVERN_MAIN_READY__ ?? Promise.resolve());
     } catch {
-        // The extension also works on ordinary SillyTavern; only companion deep-links are TT-specific.
+        // Non-TT hosts do not expose the Tauri readiness promise.
     }
     await installSettingsPanel();
     scheduleAutomaticCharacterSync(800);

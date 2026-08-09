@@ -1,11 +1,11 @@
 {
-  "display_name": "TT 后台保活实验",
+  "display_name": "四端酒馆小伴侣联动",
   "loading_order": 1,
   "requires": [],
   "optional": [],
   "js": "index.js",
   "css": "style.css",
   "author": "cicimil + Codex",
-  "version": "0.8.0",
-  "description": "生成期间用本地 WebRTC DataChannel 尽量保持 Android WebView 调度，并从角色原头像生成 384×384 高清图分片同步给小伴侣。"
+  "version": "0.9.0",
+  "description": "自动适配 SillyTavern、Luker、Termux 与 TT，同步当前角色原头像、生成状态和返回地址到四端酒馆小伴侣。"
 }
