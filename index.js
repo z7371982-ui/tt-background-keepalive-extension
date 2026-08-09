@@ -15,6 +15,7 @@ const COMPANION_CONTENT_URL = 'content://com.cicimil.ttcompanion.bridge/sync';
 const COMPANION_NOTIFICATION_TITLE = 'TT_COMPANION_SYNC_V1';
 const COMPANION_NOTIFICATION_CHANNEL = 'tauritavern_ai_generation_keepalive';
 const COMPANION_NOTIFICATION_ID = 2408;
+const COMPANION_PACKET_CHARS = 11_000;
 const DEFAULTS = Object.freeze({
     rtcEnabled: true,
     streamAssist: true,
@@ -262,16 +263,15 @@ function getTauriInvoke() {
     return typeof publicInvoke === 'function' ? publicInvoke : null;
 }
 
-async function syncThroughSilentNotification(payload) {
+async function sendSilentNotificationPacket(encodedPacket, notificationId) {
     const invoke = getTauriInvoke();
     if (!invoke) {
         throw new Error('Tauri notification bridge unavailable');
     }
 
-    const encodedPayload = JSON.stringify(payload);
     const chunks = [];
-    for (let offset = 0; offset < encodedPayload.length; offset += 3000) {
-        chunks.push(encodedPayload.slice(offset, offset + 3000));
+    for (let offset = 0; offset < encodedPacket.length; offset += 3000) {
+        chunks.push(encodedPacket.slice(offset, offset + 3000));
     }
     if (chunks.length === 0 || chunks.length > 5) {
         throw new Error('Companion payload is too large');
@@ -279,7 +279,7 @@ async function syncThroughSilentNotification(payload) {
 
     await invoke('plugin:notification|notify', {
         options: {
-            id: COMPANION_NOTIFICATION_ID,
+            id: notificationId,
             channelId: COMPANION_NOTIFICATION_CHANNEL,
             title: COMPANION_NOTIFICATION_TITLE,
             body: 'TT 小伴侣正在同步',
@@ -289,6 +289,34 @@ async function syncThroughSilentNotification(payload) {
             visibility: -1,
         },
     });
+}
+
+async function syncThroughSilentNotification(payload) {
+    const encodedPayload = JSON.stringify(payload);
+    if (encodedPayload.length <= 13_700) {
+        await sendSilentNotificationPacket(encodedPayload, COMPANION_NOTIFICATION_ID);
+        return;
+    }
+
+    const transfer = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
+    const total = Math.ceil(encodedPayload.length / COMPANION_PACKET_CHARS);
+    if (total > 64) {
+        throw new Error('Companion avatar is too large');
+    }
+
+    for (let index = 0; index < total; index += 1) {
+        const packet = JSON.stringify({
+            kind: 'multipart',
+            transfer,
+            index,
+            total,
+            chunk: encodedPayload.slice(
+                index * COMPANION_PACKET_CHARS,
+                (index + 1) * COMPANION_PACKET_CHARS,
+            ),
+        });
+        await sendSilentNotificationPacket(packet, COMPANION_NOTIFICATION_ID + 2 + index);
+    }
 }
 
 function syncThroughAndroidContentProvider(payload) {
@@ -409,40 +437,37 @@ async function makeAvatarThumbnail(avatarFile) {
         return '';
     }
 
-    const response = await fetch(getThumbnailUrl('avatar', avatarFile));
-    if (!response.ok) {
-        throw new Error(`Avatar request failed (${response.status})`);
+    let image = null;
+    try {
+        const originalResponse = await fetch(`/characters/${encodeURIComponent(avatarFile)}`, { cache: 'no-store' });
+        if (originalResponse.ok) {
+            image = await imageFromBlob(await originalResponse.blob());
+        }
+    } catch {
+        // Fall back to the thumbnail endpoint on non-TT SillyTavern hosts.
+    }
+    if (!image) {
+        const thumbnailResponse = await fetch(getThumbnailUrl('avatar', avatarFile));
+        if (!thumbnailResponse.ok) {
+            throw new Error(`Avatar request failed (${thumbnailResponse.status})`);
+        }
+        image = await imageFromBlob(await thumbnailResponse.blob());
     }
 
-    const image = await imageFromBlob(await response.blob());
     const side = Math.min(image.naturalWidth, image.naturalHeight);
     const sourceX = Math.max(0, (image.naturalWidth - side) / 2);
     const sourceY = Math.max(0, (image.naturalHeight - side) / 2);
+    const outputSize = Math.max(1, Math.min(384, side));
     const canvas = document.createElement('canvas');
-    const sizes = [144, 136, 128, 112, 96];
-    const qualities = [0.82, 0.74, 0.66, 0.58];
-    let fallback = '';
-
-    for (const size of sizes) {
-        canvas.width = size;
-        canvas.height = size;
-        const context = canvas.getContext('2d', { alpha: false });
-        context.imageSmoothingEnabled = true;
-        context.imageSmoothingQuality = 'high';
-        context.fillStyle = '#f8efe9';
-        context.fillRect(0, 0, size, size);
-        context.drawImage(image, sourceX, sourceY, side, side, 0, 0, size, size);
-
-        for (const quality of qualities) {
-            const encoded = canvas.toDataURL('image/jpeg', quality).split(',')[1] || '';
-            fallback = encoded || fallback;
-            if (encoded.length > 0 && encoded.length <= 13_700) {
-                return encoded;
-            }
-        }
-    }
-
-    return fallback;
+    canvas.width = outputSize;
+    canvas.height = outputSize;
+    const context = canvas.getContext('2d', { alpha: false });
+    context.imageSmoothingEnabled = true;
+    context.imageSmoothingQuality = 'high';
+    context.fillStyle = '#f8efe9';
+    context.fillRect(0, 0, outputSize, outputSize);
+    context.drawImage(image, sourceX, sourceY, side, side, 0, 0, outputSize, outputSize);
+    return canvas.toDataURL('image/jpeg', 0.9).split(',')[1] || '';
 }
 
 async function syncCurrentCharacter({ quiet = false, force = false, event = '' } = {}) {
@@ -514,7 +539,7 @@ function scheduleAutomaticCharacterSync(delay = 650) {
 
 function diagnosticReport() {
     return JSON.stringify({
-        extensionVersion: '0.6.0',
+        extensionVersion: '0.8.0',
         userAgent: navigator.userAgent,
         visibility: document.visibilityState,
         settings: { ...settings() },

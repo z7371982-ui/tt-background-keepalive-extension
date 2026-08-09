@@ -6,6 +6,6 @@
   "js": "index.js",
   "css": "style.css",
   "author": "cicimil + Codex",
-  "version": "0.6.0",
-  "description": "生成期间用本地 WebRTC DataChannel 尽量保持 Android WebView 调度，并通过 TT 静默通知联动高清角色头像与小伴侣常驻生成状态。"
+  "version": "0.8.0",
+  "description": "生成期间用本地 WebRTC DataChannel 尽量保持 Android WebView 调度，并从角色原头像生成 384×384 高清图分片同步给小伴侣。"
 }
