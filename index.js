@@ -11,12 +11,13 @@ import { extension_settings, renderExtensionTemplateAsync } from '../../../exten
 const MODULE_NAME = 'tt-background-keepalive';
 const RESOURCE_NAME = 'third-party/tt-background-keepalive-extension';
 const COMPANION_BRIDGE_URL = 'http://127.0.0.1:18742/sync';
+const COMPANION_FORM_BRIDGE_URL = 'http://127.0.0.1:18742/form-sync';
+const COMPANION_REGISTER_URL = 'http://127.0.0.1:18742/register';
 const COMPANION_CONTENT_URL = 'content://com.cicimil.ttcompanion.bridge/sync';
 const COMPANION_NOTIFICATION_TITLE = 'TT_COMPANION_SYNC_V1';
 const COMPANION_NOTIFICATION_CHANNEL = 'tauritavern_ai_generation_keepalive';
-const COMPANION_NOTIFICATION_ID = 2408;
 const COMPANION_PACKET_CHARS = 11_000;
-const EXTENSION_VERSION = '0.9.0';
+const EXTENSION_VERSION = '0.10.0';
 const DEFAULTS = Object.freeze({
     rtcEnabled: true,
     streamAssist: true,
@@ -386,8 +387,9 @@ async function sendSilentNotificationPacket(encodedPacket, notificationId) {
 
 async function syncThroughSilentNotification(payload) {
     const encodedPayload = JSON.stringify(payload);
+    const notificationBase = 10_000 + Math.floor(Math.random() * 1_000_000);
     if (encodedPayload.length <= 13_700) {
-        await sendSilentNotificationPacket(encodedPayload, COMPANION_NOTIFICATION_ID);
+        await sendSilentNotificationPacket(encodedPayload, notificationBase);
         return;
     }
 
@@ -408,7 +410,8 @@ async function syncThroughSilentNotification(payload) {
                 (index + 1) * COMPANION_PACKET_CHARS,
             ),
         });
-        await sendSilentNotificationPacket(packet, COMPANION_NOTIFICATION_ID + 2 + index);
+        await sendSilentNotificationPacket(packet, notificationBase + index);
+        await new Promise(resolve => setTimeout(resolve, 35));
     }
 }
 
@@ -468,6 +471,93 @@ async function syncThroughLoopback(payload) {
     }
 }
 
+function syncThroughLoopbackForm(payload) {
+    return new Promise((resolve, reject) => {
+        const frameName = `tt_companion_bridge_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+        const iframe = document.createElement('iframe');
+        const form = document.createElement('form');
+        let submitted = false;
+        const timeout = setTimeout(() => {
+            cleanup();
+            reject(new Error('Browser form bridge timed out'));
+        }, 3500);
+        const cleanup = () => {
+            clearTimeout(timeout);
+            iframe.onload = null;
+            iframe.remove();
+            form.remove();
+        };
+
+        iframe.name = frameName;
+        iframe.setAttribute('aria-hidden', 'true');
+        iframe.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;left:-10px;top:-10px;border:0';
+        iframe.onload = () => {
+            if (!submitted) {
+                submitted = true;
+                try {
+                    form.submit();
+                } catch (error) {
+                    cleanup();
+                    reject(error);
+                }
+                return;
+            }
+            cleanup();
+            resolve(true);
+        };
+        iframe.srcdoc = '<!doctype html><title>bridge</title>';
+
+        form.method = 'POST';
+        form.action = `${COMPANION_FORM_BRIDGE_URL}?t=${Date.now()}`;
+        form.target = frameName;
+        form.style.display = 'none';
+        for (const [name, value] of Object.entries(payload)) {
+            const input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = name;
+            input.value = String(value ?? '');
+            form.append(input);
+        }
+        (document.body || document.documentElement).append(iframe, form);
+    });
+}
+
+function syncThroughLoopbackRegistration(payload) {
+    return new Promise((resolve, reject) => {
+        const image = new Image();
+        const timeout = setTimeout(() => {
+            cleanup();
+            reject(new Error('Browser registration timed out'));
+        }, 2500);
+        const cleanup = () => {
+            clearTimeout(timeout);
+            image.onload = null;
+            image.onerror = null;
+            image.remove();
+        };
+        image.onload = () => {
+            cleanup();
+            resolve(true);
+        };
+        image.onerror = () => {
+            cleanup();
+            reject(new Error('Browser registration unavailable'));
+        };
+        image.alt = '';
+        image.setAttribute('aria-hidden', 'true');
+        image.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;left:-10px;top:-10px';
+        const query = new URLSearchParams({
+            name: payload.name,
+            event: payload.event,
+            source: payload.source,
+            returnUrl: payload.returnUrl,
+            t: String(Date.now()),
+        });
+        image.src = `${COMPANION_REGISTER_URL}?${query.toString()}`;
+        (document.body || document.documentElement).append(image);
+    });
+}
+
 async function postToCompanion(input = {}) {
     const payload = companionPayload(input);
     const errors = [];
@@ -484,14 +574,21 @@ async function postToCompanion(input = {}) {
         }
     };
 
-    if (payload.source === 'tt'
-        && await tryTransport('TT 静默通知', syncThroughSilentNotification)) {
-        return true;
-    }
     if (await tryTransport('四端本机通道', syncThroughLoopback)) {
         return true;
     }
+    if (await tryTransport('浏览器表单通道', syncThroughLoopbackForm)) {
+        return true;
+    }
+    if (payload.source === 'tt'
+        && await tryTransport('TT 静默通知已发出', syncThroughSilentNotification)) {
+        return true;
+    }
     if (await tryTransport('Android 系统通道', syncThroughAndroidContentProvider)) {
+        return true;
+    }
+    if (!payload.avatar
+        && await tryTransport('浏览器注册链接', syncThroughLoopbackRegistration)) {
         return true;
     }
 
@@ -499,6 +596,16 @@ async function postToCompanion(input = {}) {
     diagnostics.companionBridgeError = errors.join('; ');
     renderStatus();
     throw new Error(diagnostics.companionBridgeError);
+}
+
+async function testCompanionConnection() {
+    try {
+        await postToCompanion();
+        notify('success', `已从 ${detectTavernHost().label} 连到小伴侣。`);
+    } catch (error) {
+        console.warn('[Four Tavern Companion] Connection test failed:', error);
+        notify('warning', '没有连到小伴侣。请先在小伴侣里启动悬浮窗，再重新测试。');
+    }
 }
 
 function imageFromBlob(blob) {
@@ -807,6 +914,7 @@ async function installSettingsPanel() {
     bindCheckbox('ttka_auto_wake', 'autoWake');
     bindCheckbox('ttka_auto_character_sync', 'autoCharacterSync');
     bindHostMode();
+    document.getElementById('ttka_test_companion')?.addEventListener('click', () => void testCompanionConnection());
     document.getElementById('ttka_sync_companion')?.addEventListener('click', () => void syncCurrentCharacter({ force: true }));
     document.getElementById('ttka_copy_report')?.addEventListener('click', () => void copyDiagnostics());
     renderStatus();
