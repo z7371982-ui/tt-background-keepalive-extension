@@ -6,6 +6,6 @@
   "js": "index.js",
   "css": "style.css",
   "author": "cicimil + Codex",
-  "version": "0.16.0",
+  "version": "0.16.1",
   "description": "自动适配 SillyTavern、Luker、Termux 与 TauriTavern，同步当前角色原头像、生成状态和返回地址到四端酒馆小伴侣。"
 }
