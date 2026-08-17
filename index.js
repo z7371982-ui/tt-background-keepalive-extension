@@ -1,8 +1,10 @@
 import {
+    chat,
     characters,
     eventSource,
     event_types,
     getThumbnailUrl,
+    isGenerating,
     saveSettingsDebounced,
     this_chid,
 } from '../../../../script.js';
@@ -19,12 +21,12 @@ const COMPANION_FORM_BRIDGE_URL = 'http://127.0.0.1:18742/form-sync';
 const COMPANION_REGISTER_URL = 'http://127.0.0.1:18742/register';
 const COMPANION_OPEN_TAURI_NOTIFICATION_SETTINGS_URL = 'http://127.0.0.1:18742/open-settings?target=tauri-notifications';
 const COMPANION_CONTENT_URL = 'content://com.cicimil.ttcompanion.bridge/sync';
-const COMPANION_APK_VERSION = '1.6.0';
+const COMPANION_APK_VERSION = '1.6.2';
 const COMPANION_APK_URL = 'https://raw.githubusercontent.com/z7371982-ui/tt-background-keepalive-extension/main/TauriTavern-Companion-latest.apk';
 const COMPANION_NOTIFICATION_TITLE = 'TT_COMPANION_SYNC_V1';
 const COMPANION_NOTIFICATION_CHANNEL = 'four_tavern_companion_sync';
 const COMPANION_PACKET_CHARS = 2_800;
-const EXTENSION_VERSION = '0.17.0';
+const EXTENSION_VERSION = '0.17.2';
 const DEFAULTS = Object.freeze({
     rtcEnabled: true,
     streamAssist: true,
@@ -33,6 +35,10 @@ const DEFAULTS = Object.freeze({
     autoCharacterSync: true,
     hostMode: 'auto',
 });
+
+const USER_AGENT = navigator.userAgent || '';
+const IS_ANDROID_WEBVIEW = /Android/i.test(USER_AGENT) && /;\s*wv\)/i.test(USER_AGENT);
+const IS_REDMI_NOTE_10_PRO = /\b(?:M2104K10AC|M2101K6(?:G|I|R)?)\b/i.test(USER_AGENT);
 
 const diagnostics = {
     loadedAt: new Date().toISOString(),
@@ -51,6 +57,12 @@ const diagnostics = {
     companionBridgeError: '',
     notificationPermission: '未检查',
     notificationChannel: '未创建',
+    compatibilityMode: IS_REDMI_NOTE_10_PRO
+        ? 'Redmi Note 10 Pro：HTTP 优先＋完成检测兜底'
+        : (IS_ANDROID_WEBVIEW ? 'Android WebView 标准模式' : '标准模式'),
+    generationWatchdogState: '空闲',
+    completionFallbacks: 0,
+    criticalEventDeliveries: 0,
 };
 
 let rtcPeerA = null;
@@ -68,6 +80,11 @@ let lastSyncedCharacterKey = '';
 let notificationBridgeReady = false;
 let notificationChannelAttempted = false;
 let notificationSettingsJumpAt = 0;
+let generationWatchdogTimer = null;
+let generationBaselineFingerprint = '';
+let generationObservedOutput = false;
+let generationIdleSamples = 0;
+let generationStopInFlight = false;
 
 function collectAccessibleWindows(startWindow = window) {
     const windows = [];
@@ -194,6 +211,8 @@ function renderStatus() {
     setText('#ttka_notification_permission', diagnostics.notificationPermission);
     setText('#ttka_notification_channel', diagnostics.notificationChannel);
     setText('#ttka_host_state', detectTavernHost().label);
+    setText('#ttka_compatibility_mode', diagnostics.compatibilityMode);
+    setText('#ttka_watchdog_state', diagnostics.generationWatchdogState);
     setText(
         '#ttka_heartbeat_gap',
         diagnostics.largestHeartbeatGapMs > 0
@@ -232,6 +251,11 @@ function closeRtcGuard() {
 async function startRtcGuard() {
     closeRtcGuard();
     if (!settings().rtcEnabled || !diagnostics.generationActive) {
+        return;
+    }
+
+    if (IS_REDMI_NOTE_10_PRO) {
+        updateRtcState('红米兼容模式（已跳过）');
         return;
     }
 
@@ -784,11 +808,23 @@ async function postToCompanion(input = {}) {
         }
     };
 
-    if (await tryTransport('四端本机 WebSocket 直连', syncThroughLoopbackWebSocket)) {
-        return true;
-    }
-    if (await tryTransport('四端本机 HTTP 通道', syncThroughLoopback)) {
-        return true;
+    if (IS_REDMI_NOTE_10_PRO) {
+        // MIUI 14 may suspend this WebView during the several seconds spent
+        // waiting for failed WebSocket attempts. Use the proven loopback HTTP
+        // path first so small state packets leave the page immediately.
+        if (await tryTransport('红米 HTTP 优先通道', syncThroughLoopback)) {
+            return true;
+        }
+        if (await tryTransport('四端本机 WebSocket 直连', syncThroughLoopbackWebSocket)) {
+            return true;
+        }
+    } else {
+        if (await tryTransport('四端本机 WebSocket 直连', syncThroughLoopbackWebSocket)) {
+            return true;
+        }
+        if (await tryTransport('四端本机 HTTP 通道', syncThroughLoopback)) {
+            return true;
+        }
     }
     if (payload.source === 'tt') {
         // A blocked form navigation still fires iframe.onload in some Android WebViews.
@@ -816,6 +852,31 @@ async function postToCompanion(input = {}) {
     diagnostics.companionBridgeError = errors.join('; ');
     renderStatus();
     throw new Error(diagnostics.companionBridgeError);
+}
+
+async function postCriticalCompanionEvent(event) {
+    const payload = companionPayload({ event });
+
+    if (!IS_REDMI_NOTE_10_PRO) {
+        return postToCompanion({ event });
+    }
+
+    // Send the state through two loopback request shapes at once. The local
+    // companion de-duplicates identical events, so this is safe and avoids a
+    // missed completion when MIUI freezes the WebView immediately afterwards.
+    const results = await Promise.allSettled([
+        syncThroughLoopback(payload),
+        syncThroughLoopbackRegistration(payload),
+    ]);
+    if (results.some(result => result.status === 'fulfilled')) {
+        diagnostics.criticalEventDeliveries += 1;
+        diagnostics.companionBridgeState = '已连接（红米双路 HTTP 状态通道）';
+        diagnostics.companionBridgeError = '';
+        renderStatus();
+        return true;
+    }
+
+    return postToCompanion({ event });
 }
 
 async function testCompanionConnection() {
@@ -1047,6 +1108,73 @@ function installSurgicalStreamAssist() {
     });
 }
 
+function latestAssistantFingerprint() {
+    if (!Array.isArray(chat)) {
+        return '';
+    }
+    for (let index = chat.length - 1; index >= 0; index -= 1) {
+        const message = chat[index];
+        if (!message || message.is_user || message.is_system) {
+            continue;
+        }
+        const text = String(message.mes ?? '');
+        return `${index}|${text.length}|${text.slice(-160)}|${String(message.gen_finished ?? '')}`;
+    }
+    return '';
+}
+
+function stopGenerationWatchdog(finalState = '空闲') {
+    if (generationWatchdogTimer !== null) {
+        clearInterval(generationWatchdogTimer);
+        generationWatchdogTimer = null;
+    }
+    diagnostics.generationWatchdogState = finalState;
+    generationIdleSamples = 0;
+    generationObservedOutput = false;
+}
+
+function startGenerationWatchdog() {
+    stopGenerationWatchdog(IS_REDMI_NOTE_10_PRO ? '红米正文完成检测中' : '事件监测中');
+    generationBaselineFingerprint = latestAssistantFingerprint();
+
+    if (!IS_REDMI_NOTE_10_PRO) {
+        return;
+    }
+
+    generationWatchdogTimer = setInterval(() => {
+        if (!diagnostics.generationActive || generationStopInFlight) {
+            return;
+        }
+
+        const currentFingerprint = latestAssistantFingerprint();
+        if (currentFingerprint && currentFingerprint !== generationBaselineFingerprint) {
+            generationObservedOutput = true;
+        }
+
+        let coreStillGenerating = true;
+        try {
+            coreStillGenerating = Boolean(isGenerating());
+        } catch (error) {
+            diagnostics.generationWatchdogState = `等待官方结束事件：${error instanceof Error ? error.message : String(error)}`;
+            return;
+        }
+
+        if (!coreStillGenerating && generationObservedOutput) {
+            generationIdleSamples += 1;
+        } else {
+            generationIdleSamples = 0;
+        }
+
+        if (generationIdleSamples >= 2) {
+            diagnostics.completionFallbacks += 1;
+            diagnostics.generationWatchdogState = '红米正文完成兜底已触发';
+            clearInterval(generationWatchdogTimer);
+            generationWatchdogTimer = null;
+            void stopGenerationGuards('complete', '红米正文完成兜底');
+        }
+    }, 900);
+}
+
 async function onGenerationStarted(_type, _params, isDryRun) {
     if (isDryRun) {
         return;
@@ -1055,12 +1183,14 @@ async function onGenerationStarted(_type, _params, isDryRun) {
     diagnostics.generationActive = true;
     diagnostics.generationStartedAt = new Date().toISOString();
     diagnostics.generationEndedAt = null;
+    generationStopInFlight = false;
+    startGenerationWatchdog();
     renderStatus();
 
     if (settings().autoWake) {
         // Send the tiny state packet immediately. Avatar loading/decoding must
         // never delay or suppress the yellow "generating" reaction.
-        void postToCompanion({ event: 'generating' }).catch(error => {
+        void postCriticalCompanionEvent('generating').catch(error => {
             console.warn('[Four Tavern Companion] Generation-start state failed:', error);
         });
         // Character identity is a second independent packet. If the avatar
@@ -1071,14 +1201,20 @@ async function onGenerationStarted(_type, _params, isDryRun) {
     await Promise.allSettled([startRtcGuard(), startAudioFallback()]);
 }
 
-async function stopGenerationGuards(companionEvent) {
+async function stopGenerationGuards(companionEvent, completionSource = '官方生成事件') {
+    if (!diagnostics.generationActive || generationStopInFlight) {
+        return;
+    }
+    generationStopInFlight = true;
     diagnostics.generationActive = false;
     diagnostics.generationEndedAt = new Date().toISOString();
-    closeRtcGuard();
-    await stopAudioFallback();
+    stopGenerationWatchdog(completionSource);
     renderStatus();
+
     if (settings().autoWake) {
-        void postToCompanion({ event: companionEvent })
+        // Start the tiny HTTP packet before any asynchronous cleanup. MIUI may
+        // freeze the WebView immediately after the final text is committed.
+        void postCriticalCompanionEvent(companionEvent)
             .then(() => {
                 if (document.visibilityState !== 'visible') {
                     return;
@@ -1093,14 +1229,19 @@ async function stopGenerationGuards(companionEvent) {
                 console.warn('[Four Tavern Companion] Generation event failed:', error);
             });
     }
+
+    closeRtcGuard();
+    await stopAudioFallback();
+    renderStatus();
+    generationStopInFlight = false;
 }
 
 async function onGenerationEnded() {
-    await stopGenerationGuards('complete');
+    await stopGenerationGuards('complete', '官方结束事件');
 }
 
 async function onGenerationStopped() {
-    await stopGenerationGuards('stopped');
+    await stopGenerationGuards('stopped', '官方停止事件');
 }
 
 function bindCheckbox(id, key) {
@@ -1215,7 +1356,14 @@ eventSource.on(event_types.GENERATION_STOPPED, onGenerationStopped);
 if (event_types.MESSAGE_RECEIVED) {
     eventSource.on(event_types.MESSAGE_RECEIVED, () => {
         if (diagnostics.generationActive) {
-            void onGenerationEnded();
+            void stopGenerationGuards('complete', '正文接收事件');
+        }
+    });
+}
+if (event_types.CHARACTER_MESSAGE_RENDERED) {
+    eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, () => {
+        if (diagnostics.generationActive) {
+            void stopGenerationGuards('complete', '正文渲染事件');
         }
     });
 }

@@ -19,7 +19,7 @@
 
       <label class="checkbox_label">
         <input id="ttka_rtc_enabled" type="checkbox">
-        <span>本地 WebRTC 保活（推荐）</span>
+        <span>本地 WebRTC 保活（Redmi Note 10 Pro 会自动跳过）</span>
       </label>
       <small>在当前酒馆页面内部建立不联网、不调用摄像头或麦克风的自连接 DataChannel。</small>
 
@@ -47,8 +47,10 @@
       <small>直接读取角色原头像而不是酒馆缩略图，生成最高 384×384、90% 质量的显示图，优先通过手机本机 WebSocket 直传；不传角色卡内容或聊天记录。</small>
 
       <div class="ttka-status" aria-live="polite">
-        <div><span>扩展版本：</span><strong id="ttka_extension_version">0.17.0</strong></div>
+        <div><span>扩展版本：</span><strong id="ttka_extension_version">0.17.2</strong></div>
         <div><span>当前端：</span><strong id="ttka_host_state">识别中</strong></div>
+        <div><span>设备适配：</span><strong id="ttka_compatibility_mode">识别中</strong></div>
+        <div><span>完成检测：</span><strong id="ttka_watchdog_state">空闲</strong></div>
         <div><span>生成：</span><strong id="ttka_generation_state">空闲</strong></div>
         <div><span>页面：</span><strong id="ttka_visibility_state">可见</strong></div>
         <div><span>WebRTC：</span><strong id="ttka_rtc_state">未启动</strong></div>
