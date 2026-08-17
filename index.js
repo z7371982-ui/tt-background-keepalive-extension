@@ -6,6 +6,7 @@ import {
     getThumbnailUrl,
     isGenerating,
     saveSettingsDebounced,
+    streamingProcessor,
     this_chid,
 } from '../../../../script.js';
 import { extension_settings, renderExtensionTemplateAsync } from '../../../extensions.js';
@@ -26,7 +27,7 @@ const COMPANION_APK_URL = 'https://raw.githubusercontent.com/z7371982-ui/tt-back
 const COMPANION_NOTIFICATION_TITLE = 'TT_COMPANION_SYNC_V1';
 const COMPANION_NOTIFICATION_CHANNEL = 'four_tavern_companion_sync';
 const COMPANION_PACKET_CHARS = 2_800;
-const EXTENSION_VERSION = '0.17.2';
+const EXTENSION_VERSION = '0.17.3';
 const DEFAULTS = Object.freeze({
     rtcEnabled: true,
     streamAssist: true,
@@ -63,6 +64,12 @@ const diagnostics = {
     generationWatchdogState: '空闲',
     completionFallbacks: 0,
     criticalEventDeliveries: 0,
+    watchdogOutputChanges: 0,
+    watchdogStableMs: 0,
+    watchdogCoreGenerating: false,
+    watchdogStreamState: '未检测',
+    watchdogUiState: '未检测',
+    lastCompletionSource: '',
 };
 
 let rtcPeerA = null;
@@ -82,9 +89,16 @@ let notificationChannelAttempted = false;
 let notificationSettingsJumpAt = 0;
 let generationWatchdogTimer = null;
 let generationBaselineFingerprint = '';
+let generationLastFingerprint = '';
+let generationLastOutputChangeAt = 0;
+let generationLastTokenAt = 0;
+let generationStartedAtMs = 0;
 let generationObservedOutput = false;
 let generationIdleSamples = 0;
+let generationUiIdleSamples = 0;
 let generationStopInFlight = false;
+let generationStopButtonSeen = false;
+let generationHeuristicCompletedAt = 0;
 
 function collectAccessibleWindows(startWindow = window) {
     const windows = [];
@@ -1108,19 +1122,89 @@ function installSurgicalStreamAssist() {
     });
 }
 
-function latestAssistantFingerprint() {
-    if (!Array.isArray(chat)) {
-        return '';
-    }
-    for (let index = chat.length - 1; index >= 0; index -= 1) {
-        const message = chat[index];
-        if (!message || message.is_user || message.is_system) {
-            continue;
+function latestAssistantSnapshot() {
+    let chatFingerprint = '';
+    let chatTextLength = 0;
+    if (Array.isArray(chat)) {
+        for (let index = chat.length - 1; index >= 0; index -= 1) {
+            const message = chat[index];
+            if (!message || message.is_user || message.is_system) {
+                continue;
+            }
+            const text = String(message.mes ?? '');
+            chatTextLength = text.length;
+            chatFingerprint = `${index}|${text.length}|${text.slice(-160)}|${String(message.gen_finished ?? '')}`;
+            break;
         }
-        const text = String(message.mes ?? '');
-        return `${index}|${text.length}|${text.slice(-160)}|${String(message.gen_finished ?? '')}`;
     }
-    return '';
+
+    // Some TauriTavern builds commit streaming text to the DOM before the
+    // exported chat array catches up. Include the visible message as a second,
+    // independent signal so the watchdog is not tied to one implementation.
+    let domFingerprint = '';
+    let domTextLength = 0;
+    for (const owner of collectAccessibleWindows()) {
+        try {
+            const messages = Array.from(owner.document.querySelectorAll('#chat .mes'));
+            for (let index = messages.length - 1; index >= 0; index -= 1) {
+                const message = messages[index];
+                if (message.getAttribute('is_user') === 'true'
+                    || message.getAttribute('is_system') === 'true') {
+                    continue;
+                }
+                const text = String(message.querySelector('.mes_text')?.textContent ?? '');
+                domTextLength = text.length;
+                domFingerprint = `${message.getAttribute('mesid') ?? index}|${text.length}|${text.slice(-160)}`;
+                break;
+            }
+            if (domFingerprint) {
+                break;
+            }
+        } catch {
+            // Cross-origin parent windows are intentionally ignored.
+        }
+    }
+
+    return {
+        fingerprint: `${chatFingerprint}||${domFingerprint}`,
+        textLength: Math.max(chatTextLength, domTextLength),
+    };
+}
+
+function generationUiSnapshot() {
+    for (const owner of collectAccessibleWindows()) {
+        try {
+            const stopButton = owner.document.querySelector('#mes_stop');
+            const sendButton = owner.document.querySelector('#send_but');
+            if (!(stopButton instanceof owner.HTMLElement) || !(sendButton instanceof owner.HTMLElement)) {
+                continue;
+            }
+            const isVisible = element => {
+                const style = owner.getComputedStyle(element);
+                return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+            };
+            return {
+                stopVisible: isVisible(stopButton),
+                sendVisible: isVisible(sendButton),
+            };
+        } catch {
+            // Try the next accessible owner window.
+        }
+    }
+    return { stopVisible: false, sendVisible: false };
+}
+
+function finishFromWatchdog(source) {
+    diagnostics.completionFallbacks += 1;
+    diagnostics.generationWatchdogState = `${source}已触发`;
+    if (source === '正文静止超时兜底') {
+        generationHeuristicCompletedAt = Date.now();
+    }
+    if (generationWatchdogTimer !== null) {
+        clearInterval(generationWatchdogTimer);
+        generationWatchdogTimer = null;
+    }
+    void stopGenerationGuards('complete', source);
 }
 
 function stopGenerationWatchdog(finalState = '空闲') {
@@ -1130,12 +1214,25 @@ function stopGenerationWatchdog(finalState = '空闲') {
     }
     diagnostics.generationWatchdogState = finalState;
     generationIdleSamples = 0;
+    generationUiIdleSamples = 0;
     generationObservedOutput = false;
+    generationStopButtonSeen = false;
 }
 
 function startGenerationWatchdog() {
     stopGenerationWatchdog(IS_REDMI_NOTE_10_PRO ? '红米正文完成检测中' : '事件监测中');
-    generationBaselineFingerprint = latestAssistantFingerprint();
+    const baseline = latestAssistantSnapshot();
+    generationBaselineFingerprint = baseline.fingerprint;
+    generationLastFingerprint = baseline.fingerprint;
+    generationStartedAtMs = Date.now();
+    generationLastOutputChangeAt = generationStartedAtMs;
+    generationLastTokenAt = 0;
+    diagnostics.watchdogOutputChanges = 0;
+    diagnostics.watchdogStableMs = 0;
+    diagnostics.watchdogCoreGenerating = true;
+    diagnostics.watchdogStreamState = '等待流式状态';
+    diagnostics.watchdogUiState = '等待生成按钮状态';
+    diagnostics.lastCompletionSource = '';
 
     if (!IS_REDMI_NOTE_10_PRO) {
         return;
@@ -1146,8 +1243,14 @@ function startGenerationWatchdog() {
             return;
         }
 
-        const currentFingerprint = latestAssistantFingerprint();
-        if (currentFingerprint && currentFingerprint !== generationBaselineFingerprint) {
+        const now = Date.now();
+        const current = latestAssistantSnapshot();
+        if (current.fingerprint && current.fingerprint !== generationLastFingerprint) {
+            generationLastFingerprint = current.fingerprint;
+            generationLastOutputChangeAt = now;
+            diagnostics.watchdogOutputChanges += 1;
+        }
+        if (current.fingerprint && current.fingerprint !== generationBaselineFingerprint) {
             generationObservedOutput = true;
         }
 
@@ -1156,8 +1259,35 @@ function startGenerationWatchdog() {
             coreStillGenerating = Boolean(isGenerating());
         } catch (error) {
             diagnostics.generationWatchdogState = `等待官方结束事件：${error instanceof Error ? error.message : String(error)}`;
-            return;
         }
+        diagnostics.watchdogCoreGenerating = coreStillGenerating;
+
+        let streamPresent = false;
+        let streamFinished = false;
+        let streamHasPendingTools = false;
+        try {
+            streamPresent = Boolean(streamingProcessor);
+            streamFinished = Boolean(streamingProcessor?.isFinished);
+            streamHasPendingTools = Array.isArray(streamingProcessor?.toolCalls)
+                && streamingProcessor.toolCalls.length > 0;
+        } catch {
+            // Older compatible hosts may not expose the processor at runtime.
+        }
+        diagnostics.watchdogStreamState = streamPresent
+            ? (streamFinished
+                ? (streamHasPendingTools ? '等待工具调用结束' : '流式正文已结束')
+                : '流式正文进行中')
+            : '没有活动流式处理器';
+
+        const ui = generationUiSnapshot();
+        generationStopButtonSeen ||= ui.stopVisible;
+        diagnostics.watchdogUiState = ui.stopVisible
+            ? '停止按钮可见'
+            : (ui.sendVisible ? '发送按钮已恢复' : '按钮状态不可用');
+
+        const lastActivityAt = Math.max(generationLastOutputChangeAt, generationLastTokenAt || 0);
+        const stableMs = Math.max(0, now - lastActivityAt);
+        diagnostics.watchdogStableMs = stableMs;
 
         if (!coreStillGenerating && generationObservedOutput) {
             generationIdleSamples += 1;
@@ -1165,14 +1295,37 @@ function startGenerationWatchdog() {
             generationIdleSamples = 0;
         }
 
-        if (generationIdleSamples >= 2) {
-            diagnostics.completionFallbacks += 1;
-            diagnostics.generationWatchdogState = '红米正文完成兜底已触发';
-            clearInterval(generationWatchdogTimer);
-            generationWatchdogTimer = null;
-            void stopGenerationGuards('complete', '红米正文完成兜底');
+        if (streamFinished && !streamHasPendingTools && generationObservedOutput) {
+            finishFromWatchdog('流式处理器完成兜底');
+            return;
         }
-    }, 900);
+
+        if (generationIdleSamples >= 2) {
+            finishFromWatchdog('酒馆空闲状态兜底');
+            return;
+        }
+
+        if (generationStopButtonSeen && !ui.stopVisible && ui.sendVisible && generationObservedOutput) {
+            generationUiIdleSamples += 1;
+            if (generationUiIdleSamples >= 2) {
+                finishFromWatchdog('生成按钮恢复兜底');
+                return;
+            }
+        } else {
+            generationUiIdleSamples = 0;
+        }
+
+        // Last resort for the Redmi WebView failure seen in the field: the
+        // response body is fully present but the stream never publishes its
+        // terminal event. A long quiet tail is treated as complete. If a late
+        // token arrives, the STREAM_TOKEN_RECEIVED handler re-opens generation.
+        const generationElapsedMs = now - generationStartedAtMs;
+        if (generationObservedOutput && generationElapsedMs >= 15_000 && stableMs >= 12_000) {
+            finishFromWatchdog('正文静止超时兜底');
+            return;
+        }
+        diagnostics.generationWatchdogState = `红米正文检测中（静止 ${Math.round(stableMs / 1000)} 秒）`;
+    }, 1000);
 }
 
 async function onGenerationStarted(_type, _params, isDryRun) {
@@ -1208,6 +1361,7 @@ async function stopGenerationGuards(companionEvent, completionSource = '官方�
     generationStopInFlight = true;
     diagnostics.generationActive = false;
     diagnostics.generationEndedAt = new Date().toISOString();
+    diagnostics.lastCompletionSource = completionSource;
     stopGenerationWatchdog(completionSource);
     renderStatus();
 
@@ -1242,6 +1396,36 @@ async function onGenerationEnded() {
 
 async function onGenerationStopped() {
     await stopGenerationGuards('stopped', '官方停止事件');
+}
+
+function onStreamTokenReceived() {
+    const now = Date.now();
+    if (!diagnostics.generationActive) {
+        const shouldResume = diagnostics.lastCompletionSource === '正文静止超时兜底'
+            && now - generationHeuristicCompletedAt < 120_000;
+        if (!shouldResume) {
+            return;
+        }
+
+        // A very long provider pause can look exactly like a broken terminal
+        // event. If text resumes after the quiet-tail fallback, restore the
+        // yellow generating state automatically instead of staying green.
+        diagnostics.generationActive = true;
+        diagnostics.generationEndedAt = null;
+        generationStopInFlight = false;
+        startGenerationWatchdog();
+        generationObservedOutput = true;
+        generationLastTokenAt = now;
+        diagnostics.generationWatchdogState = '检测到后续正文，已恢复生成状态';
+        renderStatus();
+        if (settings().autoWake) {
+            void postCriticalCompanionEvent('generating').catch(() => {});
+        }
+        return;
+    }
+
+    generationLastTokenAt = now;
+    generationObservedOutput = true;
 }
 
 function bindCheckbox(id, key) {
@@ -1353,6 +1537,9 @@ installHeartbeatDiagnostics();
 eventSource.on(event_types.GENERATION_STARTED, onGenerationStarted);
 eventSource.on(event_types.GENERATION_ENDED, onGenerationEnded);
 eventSource.on(event_types.GENERATION_STOPPED, onGenerationStopped);
+if (event_types.STREAM_TOKEN_RECEIVED) {
+    eventSource.on(event_types.STREAM_TOKEN_RECEIVED, onStreamTokenReceived);
+}
 if (event_types.MESSAGE_RECEIVED) {
     eventSource.on(event_types.MESSAGE_RECEIVED, () => {
         if (diagnostics.generationActive) {
