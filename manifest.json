@@ -6,6 +6,6 @@
   "js": "index.js",
   "css": "style.css",
   "author": "cicimil + Codex",
-  "version": "0.17.3",
-  "description": "重写 Redmi Note 10 Pro 的生成完成检测，修复正文已完成但小伴侣仍显示生成中的问题。"
+  "version": "0.17.4",
+  "description": "配套小伴侣 1.6.3，修复 Redmi Note 10 Pro 生成过程中完整悬浮窗暂时消失的问题。"
 }
